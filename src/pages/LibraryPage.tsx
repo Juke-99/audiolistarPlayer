@@ -6,12 +6,23 @@ import type { Track } from "../types/track";
 import { ACCEPT_RE } from "../constants/const";
 import { readMeta } from "../audio/audioRender/readMeta";
 import BackgroundWave from "../components/BackgroundWave";
+import { useContinuousPreview } from "../hooks/audio/useContinuousPreview";
 
 export default function LibraryPage() {
   const nav = useNavigate();
   const engine = useEngine();
   const { tracks, setTracks } = useTracks();
   const [enabled, setEnabled] = useState(false);
+  const { currentIndex, handlePreviewClickById } = useContinuousPreview<Track>({
+    tracks,
+    engine,
+    getId: (t) => t.id,
+    getUrl: (t) => t.url,
+    getPreviewStartSec: (t) => t.previewStartSec,
+    getPreviewEndSec: (t) => t.previewEndSec,
+    getDuration: (t) => t.meta?.durationSec,
+    defaultWindowSec: 30,
+  });
 
   const ingestFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -49,17 +60,12 @@ export default function LibraryPage() {
 
   const preview = useCallback(
     async (t: Track) => {
-      await engine.enable(); // ← これを追加
-      engine.play({
-        id: t.id,
-        url: t.url,
-        previewStartSec: t.previewStartSec,
-        previewEndSec: t.previewEndSec,
-      });
+      await handlePreviewClickById(t.id);
     },
-    [engine]
+    [handlePreviewClickById]
   );
 
+  const now = currentIndex != null ? tracks[currentIndex] : null;
   const stop = useCallback(() => engine.stop(), [engine]);
 
   return (
@@ -215,11 +221,19 @@ export default function LibraryPage() {
           </div>
 
           <h2 style={{ margin: 0, fontSize: 24, fontWeight: 800 }}>
-            {tracks[0]?.meta?.title ?? tracks[0]?.file.name ?? "No Track"}
+            {now?.meta?.title ??
+              now?.file.name ??
+              tracks[0]?.meta?.title ??
+              tracks[0]?.file.name ??
+              "No Track"}
           </h2>
           <div style={{ fontSize: 14, opacity: 0.8 }}>
-            {(tracks[0]?.meta?.artist ?? "Unknown Artist") +
-              (tracks[0]?.meta?.album ? ` – ${tracks[0]?.meta?.album}` : "")}
+            {(now?.meta?.artist ??
+              tracks[0]?.meta?.artist ??
+              "Unknown Artist") +
+              (now?.meta?.album ?? tracks[0]?.meta?.album
+                ? ` – ${now?.meta?.album ?? tracks[0]?.meta?.album}`
+                : "")}
           </div>
         </section>
 

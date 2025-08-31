@@ -1,4 +1,3 @@
-// src/audio/usePreviewEngine.ts
 import { useMemo, useRef } from "react";
 
 type PlayOpts = {
@@ -10,11 +9,16 @@ type PlayOpts = {
   previewEndSec?: number;
 };
 
+type PreviewEndInfo = { id: string; reason: "preview-end" | "ended" };
+type PreviewEndListener = (info: PreviewEndInfo) => void;
+
 type Engine = {
   enable: () => Promise<void>;
   getAnalyser: () => AnalyserNode | null;
   play: (opts: PlayOpts) => Promise<void>;
   stop: () => Promise<void>;
+  /** プレビュー区間が終わった/フルで ended に到達した通知 */
+  onPreviewEnd: (cb: PreviewEndListener) => () => void;
 };
 
 export function usePreviewEngine({
@@ -26,8 +30,32 @@ export function usePreviewEngine({
   const mediaSrcRef = useRef<MediaElementAudioSourceNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const gainRef = useRef<GainNode | null>(null);
+
+  // 以前の setTimeout 用の参照（現在は未使用。残しておくが実質 noop）
   const previewTimerRef = useRef<number | null>(null);
   const currentUrlRef = useRef<string | null>(null);
+
+  // --- 連続プレビュー用（イベント購読） ---
+  const listenersRef = useRef<Set<PreviewEndListener>>(new Set());
+  const currentRef = useRef<{ id: string; previewEnd?: number } | null>(null);
+  const boundRef = useRef(false);
+
+  const onPreviewEnd = (cb: PreviewEndListener) => {
+    listenersRef.current.add(cb);
+    return () => listenersRef.current.delete(cb);
+  };
+
+  const notifyPreviewEnd = (reason: "preview-end" | "ended") => {
+    const cur = currentRef.current;
+    if (!cur) return;
+    for (const cb of listenersRef.current) {
+      try {
+        cb({ id: cur.id, reason });
+      } catch {}
+    }
+    // 多重発火防止：いったんクリア（次の play() で再設定）
+    currentRef.current = null;
+  };
 
   async function ensureNodes() {
     if (!audioCtxRef.current) {
@@ -41,23 +69,27 @@ export function usePreviewEngine({
       el.loop = false;
       audioElRef.current = el;
     }
+
+    // Graph を（未構築/ズレていたら）構築
     if (
       !mediaSrcRef.current ||
       mediaSrcRef.current.mediaElement !== audioElRef.current
     ) {
-      // 再作成（同一audioでもOK）
-      if (mediaSrcRef.current) {
-        try {
-          mediaSrcRef.current.disconnect();
-        } catch {}
-      }
-      const ctx = audioCtxRef.current!;
-      mediaSrcRef.current = ctx.createMediaElementSource(audioElRef.current!);
+      // 既存ノードの切断
+      try {
+        mediaSrcRef.current?.disconnect();
+        gainRef.current?.disconnect();
+        analyserRef.current?.disconnect();
+      } catch {}
 
-      // ノード鎖：media -> gain -> analyser -> destination
+      // 新規構築
+      mediaSrcRef.current = audioCtxRef.current!.createMediaElementSource(
+        audioElRef.current!
+      );
+
       if (!gainRef.current) {
         gainRef.current = audioCtxRef.current!.createGain();
-        gainRef.current.gain.value = 0;
+        gainRef.current.gain.value = 0; // 初期はミュート（フェードインで上げる）
       }
       if (!analyserRef.current) {
         analyserRef.current = audioCtxRef.current!.createAnalyser();
@@ -68,6 +100,40 @@ export function usePreviewEngine({
       mediaSrcRef.current.connect(gainRef.current);
       gainRef.current.connect(analyserRef.current);
       analyserRef.current.connect(audioCtxRef.current!.destination);
+    }
+
+    // 一度だけイベントを張る（フル終了 and プレビュー終端検知）
+    if (!boundRef.current && audioElRef.current) {
+      const audio = audioElRef.current;
+
+      // フル再生で自然に末端へ到達したとき
+      audio.addEventListener("ended", () => {
+        if (currentRef.current) notifyPreviewEnd("ended");
+      });
+
+      // プレビュー終端（previewEndSec）を timeupdate で確実に検知
+      audio.addEventListener("timeupdate", () => {
+        const end = currentRef.current?.previewEnd;
+        if (typeof end !== "number") return;
+        // 少し手前でフェードアウト開始（クリック音対策）
+        if (audio.currentTime >= end - 0.03) {
+          try {
+            const now = audioCtxRef.current!.currentTime;
+            const g = gainRef.current!;
+            g.gain.cancelScheduledValues(now);
+            g.gain.setValueAtTime(g.gain.value, now);
+            g.gain.linearRampToValueAtTime(
+              0,
+              now + Math.min(0.08, fadeOutMs / 1000)
+            );
+          } catch {}
+          audio.pause();
+          audio.currentTime = end;
+          notifyPreviewEnd("preview-end");
+        }
+      });
+
+      boundRef.current = true;
     }
   }
 
@@ -117,42 +183,10 @@ export function usePreviewEngine({
       typeof opts.previewEndSec === "number" &&
       opts.previewEndSec! > opts.previewStartSec!;
 
-    try {
-      audio.currentTime = hasPreviewRange ? opts.previewStartSec! : 0;
-    } catch {
-      // たまに ready 前に set で例外になるブラウザがあるので保険
-      audio.addEventListener(
-        "loadedmetadata",
-        () => {
-          audio.currentTime = hasPreviewRange ? opts.previewStartSec! : 0;
-        },
-        { once: true }
-      );
-    }
+    audio.currentTime = hasPreviewRange ? opts.previewStartSec! : 0;
 
-    // ループや区切りは明示的に無効化
-    audio.loop = false;
-    audio.onended = null;
-
-    // フル再生：preview タイマーは張らない
-    // プレビュー：end で止めるタイマーを張る
-    if (hasPreviewRange) {
-      const playWindow = Math.max(
-        0,
-        (opts.previewEndSec! - opts.previewStartSec!) * 1000
-      );
-      previewTimerRef.current = window.setTimeout(async () => {
-        previewTimerRef.current = null;
-        // やさしく止める
-        const now = audioCtxRef.current!.currentTime;
-        gain.gain.cancelScheduledValues(now);
-        gain.gain.setValueAtTime(gain.gain.value, now);
-        gain.gain.linearRampToValueAtTime(0, now + fadeOutMs / 1000);
-        setTimeout(() => {
-          audio.pause();
-        }, fadeOutMs);
-      }, playWindow);
-    }
+    // いまのプレビュー終端を記録（フル再生は undefined）
+    currentRef.current = { id: opts.id, previewEnd: opts.previewEndSec };
 
     // フェードインして再生
     const now = audioCtxRef.current!.currentTime;
@@ -180,5 +214,8 @@ export function usePreviewEngine({
   }
 
   // Hook 的には memo で同一参照を返すだけでOK
-  return useMemo<Engine>(() => ({ enable, getAnalyser, play, stop }), []);
+  return useMemo<Engine>(
+    () => ({ enable, getAnalyser, play, stop, onPreviewEnd }),
+    []
+  );
 }
