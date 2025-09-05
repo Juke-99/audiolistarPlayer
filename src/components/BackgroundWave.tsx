@@ -28,6 +28,7 @@ export default function BackgroundWave({
   useEffect(() => {
     const cvs = bgCanvasRef.current;
     if (!cvs) return;
+
     const ctx2d = cvs.getContext("2d");
     if (!ctx2d) return;
 
@@ -45,25 +46,9 @@ export default function BackgroundWave({
       ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
       prevLevels = new Float32Array(Math.max(24, Math.floor(width / 10)) + 64);
     };
+
     resize();
     window.addEventListener("resize", resize);
-
-    const idle = (t: number) => {
-      // 解析器がまだ無いときの控えめな背景アニメ
-      ctx2d.fillStyle = white ? "white" : "#0b1020";
-      ctx2d.fillRect(0, 0, width, height);
-      ctx2d.globalAlpha = 0.08;
-      ctx2d.beginPath();
-      const A = height * 0.08;
-      const mid = height * 0.55;
-      for (let x = 0; x < width; x++) {
-        const y = mid + Math.sin((x + t * 120) * 0.01) * A;
-        if (x === 0) ctx2d.moveTo(x, y);
-        else ctx2d.lineTo(x, y);
-      }
-      ctx2d.stroke();
-      ctx2d.globalAlpha = 1;
-    };
 
     let spectrum = new Uint8Array(1024); // サイズは後で合わせる
 
@@ -77,6 +62,7 @@ export default function BackgroundWave({
         if (spectrum.length !== analyser.frequencyBinCount) {
           spectrum = new Uint8Array(analyser.frequencyBinCount);
         }
+
         analyser.getByteFrequencyData(spectrum);
 
         drawBlockBars(
@@ -99,13 +85,13 @@ export default function BackgroundWave({
           },
           frame++
         );
-      } else {
-        idle(performance.now() * 0.0015);
       }
+
       rafRef.current = requestAnimationFrame(loop);
     };
 
     loop();
+
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       window.removeEventListener("resize", resize);

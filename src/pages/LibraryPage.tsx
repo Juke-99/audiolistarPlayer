@@ -27,10 +27,13 @@ export default function LibraryPage() {
   const ingestFiles = useCallback(
     async (files: FileList | File[]) => {
       const next: Track[] = [];
+
       for (const f of Array.from(files)) {
         if (!ACCEPT_RE.test(f.name)) continue;
+
         const url = URL.createObjectURL(f);
         const meta = await readMeta(f);
+
         next.push({
           id: crypto.randomUUID(),
           file: f,
@@ -45,8 +48,10 @@ export default function LibraryPage() {
         prev.forEach((t) => {
           URL.revokeObjectURL(t.url);
           const u = t.meta?.pictureUrl;
+
           if (u && u.startsWith("blob:")) URL.revokeObjectURL(u);
         });
+
         return next;
       });
     },

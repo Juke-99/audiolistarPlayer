@@ -133,7 +133,7 @@ export default function PlayerPage() {
         style={{
           position: "relative",
           zIndex: 1,
-          minHeight: "calc(95vh - 80px)",
+          minHeight: "calc(100vh - 80px)",
           display: "grid",
           placeItems: "center",
           padding: 16,
@@ -153,6 +153,7 @@ export default function PlayerPage() {
             padding: 18,
             gridTemplateColumns: "1.3fr 1fr",
             alignItems: "center",
+            transform: "translateY(-25px)",
           }}
         >
           {/* 左：アートワーク */}

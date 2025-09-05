@@ -1,80 +1,197 @@
-// src/audio/readMeta.ts
-import { parseBlob, type IAudioMetadata } from "music-metadata";
 import {
-  pickFromCommon,
-  pickFromNative,
-  sniffMime,
-  u8ToBlob,
-} from "../../utils/picture";
-import { fetchArtworkByItunesSearch } from "../../utils/fetchItunesArtwork";
+  fetchArtworkByItunesIds,
+  fetchArtworkByItunesSearch,
+} from "../../utils/fetchItunesArtwork";
 
-export type TrackMeta = {
+export type ReadMetaOptions = {
+  /** true: 埋め込みアート最優先（既定）。false: 外部(Apple/iTunes)を優先 */
+  preferEmbeddedArtwork?: boolean;
+  /** "jp"(既定) / "us" など */
+  country?: string;
+};
+
+export type ParsedTrackMeta = {
   title?: string;
   artist?: string;
   album?: string;
-  year?: number;
+  albumartist?: string;
+  artists?: string[];
   genre?: string[];
+  year?: number;
+  date?: string;
+
+  track?: { no?: number; of?: number };
+  disk?: { no?: number; of?: number };
+
   durationSec?: number;
-  pictureUrl?: string; // blob: or https:
-  pictureMime?: string;
-  hasEmbeddedArt?: boolean;
-  source?: "embedded" | "itunes";
+  bitrate?: number;
+  sampleRate?: number;
+  channels?: number;
+  lossless?: boolean;
+
+  pictureUrl?: string;
+  pictureSource?:
+    | "embedded"
+    | "itunes-collectionId"
+    | "itunes-trackId"
+    | "itunes-search"
+    | null;
+
+  itunes?: {
+    collectionId?: number; // plID
+    trackId?: number; // cnID
+    artistId?: number; // atID
+  };
 };
 
-export async function readMeta(file: File): Promise<TrackMeta> {
-  const meta: IAudioMetadata = await parseBlob(file, {
-    duration: true,
-    skipCovers: false,
-  });
+// ---------- 小ユーティリティ ----------
+const isBrowser = () =>
+  typeof window !== "undefined" && typeof document !== "undefined";
+const hasBlob = () => typeof Blob !== "undefined";
+const isBlob = (v: unknown): v is Blob => hasBlob() && v instanceof Blob;
 
-  let pictureUrl: string | undefined;
-  let pictureMime: string | undefined;
-  let hasEmbeddedArt = false;
-  let source: "embedded" | "itunes" | undefined;
+const safeCountry = (c?: string) => (c ?? "jp").toLowerCase();
 
-  // 1) 埋め込み画像（common → native）
-  const pic = pickFromCommon(meta.common.picture);
-  if (pic?.data) {
-    const u8 = pic.data as unknown as Uint8Array;
-    pictureMime = pic.format || sniffMime(u8);
-    pictureUrl = URL.createObjectURL(u8ToBlob(u8, pictureMime));
-    hasEmbeddedArt = true;
-    source = "embedded";
-  } else {
-    const nat = pickFromNative(meta.native);
-    if (nat) {
-      pictureMime = nat.mime || sniffMime(nat.data);
-      pictureUrl = URL.createObjectURL(u8ToBlob(nat.data, pictureMime));
-      hasEmbeddedArt = true;
-      source = "embedded";
-    }
-  }
+function numOrUndef(v: unknown): number | undefined {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
 
-  // 2) 埋め込みが無い場合は iTunes Search で補完
-  if (!pictureUrl) {
-    const title = meta.common.title ?? file.name.replace(/\.[^.]+$/, "");
-    const artist = meta.common.artist ?? meta.common.artists?.[0];
-    const album = meta.common.album;
-    const hit = await fetchArtworkByItunesSearch(title, artist, album, "jp");
-    if (hit) {
-      pictureUrl = hit.url; // https: 外部URL（revoke不要）
-      pictureMime = "image/jpeg";
-      source = "itunes";
-    }
-  }
-
+function extractItunesIds(mm: any) {
+  const arr =
+    (mm?.native?.iTunes as Array<{ id: string; value: unknown }>) ?? [];
+  const pick = (tag: string) =>
+    numOrUndef(arr.find((t) => t.id === tag)?.value);
   return {
-    title: meta.common.title ?? file.name.replace(/\.[^.]+$/, ""),
-    artist: meta.common.artist ?? meta.common.artists?.[0],
-    album: meta.common.album,
-    year: meta.common.year,
-    genre: meta.common.genre,
-    durationSec: meta.format.duration
-      ? Math.round(meta.format.duration)
-      : undefined,
-    pictureUrl,
-    pictureMime,
-    hasEmbeddedArt,
-    source,
+    collectionId: pick("plID"),
+    trackId: pick("cnID"),
+    artistId: pick("atID"),
   };
+}
+
+function extractEmbeddedArtworkUrl(mm: any): string | undefined {
+  const pic = mm?.common?.picture?.[0];
+  if (!pic?.data) return;
+  try {
+    const mime = pic.format || "image/jpeg";
+    const blob = new Blob([pic.data], { type: mime });
+    return URL.createObjectURL(blob);
+  } catch {
+    return;
+  }
+}
+
+// ---------- メイン ----------
+export async function readMeta(
+  file: Blob | ArrayBuffer | Uint8Array,
+  opts: ReadMetaOptions = {}
+): Promise<ParsedTrackMeta> {
+  const preferEmbedded = opts.preferEmbeddedArtwork ?? true;
+  const country = safeCountry(opts.country);
+
+  // 1) 解析（ブラウザ: parseBlob / Node: parseBuffer）
+  let mm: any;
+  if (isBrowser() && isBlob(file)) {
+    const { parseBlob } = await import("music-metadata");
+    mm = await parseBlob(file);
+  } else {
+    const { parseBuffer } = await import("music-metadata");
+    // 入力を Buffer に寄せる
+    let buf: Uint8Array;
+    if (file instanceof Uint8Array) {
+      buf = file;
+    } else if (file instanceof ArrayBuffer) {
+      buf = new Uint8Array(file);
+    } else if (isBlob(file)) {
+      buf = new Uint8Array(await file.arrayBuffer());
+    } else {
+      throw new Error("Unsupported input type for readMeta()");
+    }
+    // music-metadata の parseBuffer は第2引数に { mimeType, size } を渡す形が安全
+    mm = await parseBuffer(Buffer.from(buf), {
+      mimeType: undefined,
+      size: buf.byteLength,
+    });
+  }
+
+  // 2) 共通メタを整形
+  const meta: ParsedTrackMeta = {
+    title: mm?.common?.title ?? undefined,
+    artist: mm?.common?.artist ?? undefined,
+    album: mm?.common?.album ?? undefined,
+    albumartist: mm?.common?.albumartist ?? undefined,
+    artists: mm?.common?.artists ?? undefined,
+    genre: mm?.common?.genre ?? undefined,
+    year: mm?.common?.year ?? undefined,
+    date: mm?.common?.date ?? undefined,
+
+    track: mm?.common?.track ?? undefined,
+    disk: mm?.common?.disk ?? undefined,
+
+    durationSec: numOrUndef(mm?.format?.duration),
+    bitrate: numOrUndef(mm?.format?.bitrate),
+    sampleRate: numOrUndef(mm?.format?.sampleRate),
+    channels: numOrUndef(mm?.format?.numberOfChannels),
+    lossless: Boolean(mm?.format?.lossless),
+
+    pictureUrl: undefined,
+    pictureSource: null,
+
+    itunes: extractItunesIds(mm),
+  };
+
+  // 3) 埋め込みアート（優先時のみ）
+  if (preferEmbedded) {
+    const emb = extractEmbeddedArtworkUrl(mm);
+    if (emb) {
+      meta.pictureUrl = emb;
+      meta.pictureSource = "embedded";
+      return meta;
+    }
+  }
+
+  // 4) iTunes ID（plID/cnID）で lookup（国を合わせる）
+  if (meta.itunes?.collectionId || meta.itunes?.trackId) {
+    const byId = await fetchArtworkByItunesIds(
+      {
+        collectionId: meta.itunes?.collectionId,
+        trackId: meta.itunes?.trackId,
+      },
+      country
+    );
+    if (byId?.url) {
+      meta.pictureUrl = byId.url;
+      meta.pictureSource = meta.itunes?.collectionId
+        ? "itunes-collectionId"
+        : "itunes-trackId";
+      return meta;
+    }
+  }
+
+  // 5) 検索フォールバック（アルバム/アーティストで厳しめ）
+  const title = meta.title ?? "";
+  const artist = meta.artist ?? meta.artists?.[0] ?? "";
+  const album = meta.album ?? "";
+  const bySearch = await fetchArtworkByItunesSearch(
+    title,
+    artist,
+    album,
+    country
+  );
+  if (bySearch?.url) {
+    meta.pictureUrl = bySearch.url;
+    meta.pictureSource = "itunes-search";
+    return meta;
+  }
+
+  // 6) 外部で見つからず、外部優先だった場合は最後に埋め込みをもう一度
+  if (!preferEmbedded) {
+    const emb = extractEmbeddedArtworkUrl(mm);
+    if (emb) {
+      meta.pictureUrl = emb;
+      meta.pictureSource = "embedded";
+    }
+  }
+
+  return meta;
 }

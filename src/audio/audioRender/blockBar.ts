@@ -1,5 +1,3 @@
-// src/audio/audioRender/blockBar.ts
-
 export type BlockBarsOptions = {
   // 従来パラメータ
   bars?: number;
@@ -43,6 +41,7 @@ const hexToRgb = (hex: string): RGB => {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex);
   if (!m) return { r: 255, g: 0, b: 128 };
   const v = parseInt(m[1], 16);
+
   return { r: (v >> 16) & 0xff, g: (v >> 8) & 0xff, b: v & 0xff };
 };
 const rgbToCss = ({ r, g, b }: RGB, a = 1) =>
@@ -55,12 +54,14 @@ const mix = (a: RGB, b: RGB, t: number): RGB => ({
 const samplePalette = (palette: string[], phase: number, alpha = 1): string => {
   if (!palette.length) return "rgba(255,0,128,1)";
   if (palette.length === 1) return rgbToCss(hexToRgb(palette[0]), alpha);
+
   const p = ((phase % 1) + 1) % 1;
   const seg = 1 / palette.length;
   const idx = Math.floor(p / seg);
   const t = (p - idx * seg) / seg;
   const c1 = hexToRgb(palette[idx]);
   const c2 = hexToRgb(palette[(idx + 1) % palette.length]);
+
   return rgbToCss(mix(c1, c2, t), alpha);
 };
 
@@ -76,6 +77,7 @@ const hslaSafe = (
   const L = Math.round(clamp(safe(l, 0), 0, 100));
   const A = Math.round(clamp(safe(a, 1), 0, 1) * 1000) / 1000;
   const str = `hsla(${H}, ${S}%, ${L}%, ${A})`;
+
   return Number.isFinite(H) &&
     Number.isFinite(S) &&
     Number.isFinite(L) &&
@@ -125,6 +127,7 @@ export function drawBlockBars(
       8,
       Math.floor(safe(opt.bars ?? Math.floor(width / 7), width / 7))
     );
+
     bars = cfgBars;
     gap = safe(opt.gap ?? 1.5, 1.5);
     blockH = Math.max(1, Math.floor(safe(opt.blockHeight ?? 3, 3)));
@@ -158,10 +161,10 @@ export function drawBlockBars(
 
     let sum = 0;
     for (let k = start; k < end; k++) sum += spectrum[k];
+
     const avg = sum / (end - start); // 0..255
     const norm = Math.pow(avg / 255, 0.82); // 0..1
     const target = norm * height;
-
     const prev = prevLevels[i] || 0;
     const level = prev * smoothing + target * (1 - smoothing);
     prevLevels[i] = level;
