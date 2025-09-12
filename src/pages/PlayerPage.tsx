@@ -125,7 +125,51 @@ export default function PlayerPage() {
 
       {/* ヘッダ */}
       <div style={{ position: "relative", zIndex: 2, padding: "12px 16px" }}>
-        <button onClick={() => nav("/")}>&larr; ライブラリに戻る</button>
+        <button
+          onClick={() => {
+            // 押したら再生停止（即止めたいので pause。フェードさせたいなら stop() に）
+            try {
+              engine.pause();
+            } catch {}
+            // 履歴があれば戻る。無ければライブラリへ
+            if (window.history.length > 1) nav(-1);
+            else nav("/");
+          }}
+          aria-label="戻る"
+          title="戻る"
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: "9999px",
+            display: "inline-grid",
+            placeItems: "center",
+            border: "1px solid rgba(0,0,0,.15)",
+            background: "white",
+            boxShadow: "0 2px 6px rgba(0,0,0,.06)",
+            cursor: "pointer",
+            transition: "transform .08s ease",
+          }}
+          onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.96)")}
+          onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
+          onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
+        >
+          {/* 左矢印（SVG） */}
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            aria-hidden="true"
+          >
+            <path
+              d="M15 18l-6-6 6-6"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
       </div>
 
       {/* 中央配置 */}
