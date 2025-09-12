@@ -1,6 +1,6 @@
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useTracks } from "../contexts/TrackContext";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import BackgroundWave from "../components/BackgroundWave";
 import { useEngine } from "../contexts/EngineContext";
 
@@ -16,6 +16,66 @@ export default function PlayerPage() {
   const nav = useNavigate();
   const engine = useEngine();
   const { tracks } = useTracks();
+  const { search } = useLocation();
+
+  const [nowId, setNowId] = useState<string | null>(null);
+
+  const queueIds = useMemo(() => {
+    const fromUrl = new URLSearchParams(search).get("queue") || "";
+    const arr = (
+      fromUrl
+        ? fromUrl.split(",")
+        : (sessionStorage.getItem("queue") || "").split(",")
+    )
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const seen = new Set<string>();
+    const valid = new Set(tracks.map((t) => t.id));
+    const dedupFiltered: string[] = [];
+    for (const x of arr)
+      if (!seen.has(x) && valid.has(x)) {
+        seen.add(x);
+        dedupFiltered.push(x);
+      }
+    // キューが空なら、現在の曲のみ（単曲再生）
+    return dedupFiltered.length ? dedupFiltered : id ? [id] : [];
+  }, [search, tracks, id]);
+
+  // URL > sessionStorage の順で採用し、tracksに存在するIDだけ残す
+  const queue = useMemo(() => {
+    const fromUrl = new URLSearchParams(search).get("queue") || "";
+    const raw = fromUrl || sessionStorage.getItem("queue") || "";
+    const arr = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    // 重複除去＋存在チェック
+    const valid = new Set(tracks.map((t) => t.id));
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const x of arr)
+      if (!seen.has(x) && valid.has(x)) {
+        seen.add(x);
+        out.push(x);
+      }
+
+    // キューが空なら単曲再生（現在IDのみ）
+    return out.length ? out : id ? [id] : [];
+  }, [search, tracks, id]);
+
+  // 現在のID / キュー / インデックスを参照するためのref（イベント内で安定して使う）
+  const idRef = useRef<string | null>(null);
+  const queueRef = useRef<string[]>([]);
+  const indexRef = useRef<number>(-1);
+
+  // キューと現在IDが変わったときにrefを更新
+  useEffect(() => {
+    idRef.current = id ?? null;
+    queueRef.current = queue;
+    indexRef.current = id ? queue.indexOf(id) : -1;
+  }, [id, queue]);
 
   // トラックが無い場合も落ちないようにガード
   if (!tracks || tracks.length === 0) {
@@ -27,9 +87,10 @@ export default function PlayerPage() {
     );
   }
 
+  const effectiveId = nowId ?? id ?? null;
   const track = useMemo(
-    () => tracks.find((t) => t.id === id) ?? tracks[0],
-    [tracks, id]
+    () => (effectiveId ? tracks.find((t) => t.id === effectiveId) : tracks[0]),
+    [tracks, effectiveId]
   );
 
   // 再生状態（エンジンから購読）
@@ -43,6 +104,8 @@ export default function PlayerPage() {
   // ★ パレットは安定参照に（点滅防止）
   const wavePalette = useMemo(() => ["#fca5a5", "#93c5fd", "#86efac"], []);
 
+  const advancedRef = useRef<string | null>(null);
+
   useEffect(() => {
     // 時間/状態の購読
     const off = engine.onTick((info) => {
@@ -50,23 +113,88 @@ export default function PlayerPage() {
       setDuration(info.duration);
       setPaused(info.paused);
       setBuffered(info.buffered);
+      setNowId(info.id ?? null);
     });
 
     return off;
   }, [engine]);
 
-  // ページ遷移時にフル再生へ（previewEnd を外す）
+  useEffect(() => {
+    // "queue" は ライブラリ側で selectedIds を保存しておく想定（下に例あり）
+    const raw = (sessionStorage.getItem("queue") || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    // 存在チェック＋重複除去
+    const valid = new Set(tracks.map((t) => t.id));
+    const seen = new Set<string>();
+    const q: string[] = [];
+    for (const x of raw)
+      if (valid.has(x) && !seen.has(x)) {
+        seen.add(x);
+        q.push(x);
+      }
+
+    // キューが空なら単曲再生扱い
+    queueRef.current = q.length ? q : id ? [id] : [];
+  }, [tracks, id]);
+
+  useEffect(() => {
+    // 自動次曲は: キューがあり、曲IDがあり、durationが有効な時だけ
+    if (!queueIds.length || !id) return;
+    if (!Number.isFinite(duration) || duration <= 0) return;
+
+    // 終了判定（少しマージンを取る）
+    const ended = paused && currentTime >= Math.max(0, duration - 0.25);
+
+    if (ended && advancedRef.current !== id) {
+      advancedRef.current = id; // 同じ曲で多重発火しないように
+
+      const idx = queueIds.indexOf(id);
+      const nextId = idx >= 0 ? queueIds[idx + 1] : undefined;
+      if (!nextId) return; // 末尾は停止でOK
+
+      // 音を確実に止めてから次へ（フェードさせたいなら stop() に置換）
+      try {
+        engine.pause();
+      } catch {}
+
+      const q = encodeURIComponent(queueIds.join(","));
+      nav(`/play/${nextId}?queue=${q}`, { replace: true });
+    }
+
+    // 再生が再開された/シークで戻った場合は、再び発火できるように解除
+    if (!ended && advancedRef.current === id) {
+      advancedRef.current = null;
+    }
+  }, [currentTime, duration, paused, queueIds, id, nav, engine]);
+
   useEffect(() => {
     if (!track) return;
-    const s = engine.getState();
-
-    if (s.id !== track.id || !Number.isFinite(s.duration)) {
-      (async () => {
+    (async () => {
+      try {
         await engine.enable();
-        await engine.play({ id: track.id, url: track.url });
-      })();
-    }
-  }, [track?.id, track?.url]);
+        await engine.play({
+          id: track.id,
+          url: track.url,
+          previewStartSec: undefined,
+          previewEndSec: undefined,
+        });
+        await ensurePlaying(); // ★ 追加
+        setTimeout(() => {
+          ensurePlaying();
+        }, 50); // ★ 追加（保険）
+      } catch {}
+    })();
+  }, [track?.id, track?.url, engine]);
+
+  const routeIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    routeIdRef.current = id ?? null;
+  }, [id]);
+
+  const endGuardRef = useRef(false);
 
   // 操作系
   const onToggle = useCallback(() => engine.toggle(), [engine]);
@@ -77,6 +205,88 @@ export default function PlayerPage() {
     },
     [engine]
   );
+
+  const ensurePlaying = async () => {
+    try {
+      const s = engine.getState?.();
+      // まだ pause 中なら再開する
+      if (!s || s.paused) {
+        await engine.resume?.();
+      }
+    } catch {}
+  };
+
+  // ★ 前の曲へ
+  const playPrevInQueue = useCallback(async () => {
+    const q = queueRef.current;
+    const curId = nowId ?? routeIdRef.current ?? null;
+    if (!curId) return;
+
+    const idx = q.indexOf(curId);
+    const prevId = idx > 0 ? q[idx - 1] : null;
+    if (!prevId) return;
+
+    const prevTrack = tracks.find((t) => t.id === prevId);
+    if (!prevTrack) return;
+
+    // 切替（フェードさせたいなら先に await engine.stop()）
+    await engine.play({
+      id: prevTrack.id,
+      url: prevTrack.url,
+      previewStartSec: undefined,
+      previewEndSec: undefined,
+    });
+    await ensurePlaying();
+    setTimeout(() => {
+      ensurePlaying();
+    }, 50);
+  }, [engine, tracks, nowId]);
+
+  const playNextInQueue = useCallback(async () => {
+    const q = queueRef.current;
+    const curId = nowId ?? routeIdRef.current ?? null;
+    if (!curId) return;
+
+    const idx = q.indexOf(curId);
+    const nextId = idx >= 0 ? q[idx + 1] : null;
+    if (!nextId) return;
+
+    const nextTrack = tracks.find((t) => t.id === nextId);
+    if (!nextTrack) return;
+
+    // 1) セットして
+    await engine.play({
+      id: nextTrack.id,
+      url: nextTrack.url,
+      previewStartSec: undefined,
+      previewEndSec: undefined,
+    });
+
+    // 2) すぐ再生開始を強制
+    await ensurePlaying();
+
+    // 3) 念のため少し後でもう一度（ブラウザのreadyタイミング対策）
+    setTimeout(() => {
+      ensurePlaying();
+    }, 50);
+  }, [engine, tracks, nowId]);
+
+  useEffect(() => {
+    const off = engine.onPreviewEnd?.(({ reason }) => {
+      if (reason !== "ended") return; // プレビューは連続させない場合
+      if (endGuardRef.current) return;
+      endGuardRef.current = true;
+      playNextInQueue();
+    });
+    return () => {
+      off && off();
+      endGuardRef.current = false;
+    };
+  }, [engine, playNextInQueue]);
+
+  useEffect(() => {
+    endGuardRef.current = false;
+  }, [nowId]);
 
   const title =
     track?.meta?.title ??
@@ -340,6 +550,120 @@ export default function PlayerPage() {
                 title="先頭へ"
               >
                 ⏮ 先頭
+              </button>
+
+              <button
+                onClick={playPrevInQueue}
+                aria-label="前の曲へ"
+                title="前の曲へ（Shift+←）"
+                style={{
+                  width: 40,
+                  height: 40,
+                  borderRadius: 9999,
+                  display: "grid",
+                  placeItems: "center",
+                  border: "1px solid rgba(0,0,0,.15)",
+                  background: "white",
+                  boxShadow: "0 2px 6px rgba(0,0,0,.06)",
+                  cursor: "pointer",
+                  transition: "transform .06s ease",
+                  opacity:
+                    queueRef.current.indexOf(
+                      nowId ?? routeIdRef.current ?? ""
+                    ) > 0
+                      ? 1
+                      : 0.5,
+                  pointerEvents:
+                    queueRef.current.indexOf(
+                      nowId ?? routeIdRef.current ?? ""
+                    ) > 0
+                      ? "auto"
+                      : "none",
+                }}
+                onMouseDown={(e) =>
+                  (e.currentTarget.style.transform = "scale(0.96)")
+                }
+                onMouseUp={(e) =>
+                  (e.currentTarget.style.transform = "scale(1)")
+                }
+                onMouseLeave={(e) =>
+                  (e.currentTarget.style.transform = "scale(1)")
+                }
+              >
+                {/* 左二重矢印 */}
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M11 18l-6-6 6-6"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M19 18l-6-6 6-6"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+
+              <button
+                onClick={playNextInQueue}
+                aria-label="次の曲へ"
+                title="次の曲へ（Shift+→）"
+                style={{
+                  width: 40,
+                  height: 40,
+                  borderRadius: 9999,
+                  display: "grid",
+                  placeItems: "center",
+                  border: "1px solid rgba(0,0,0,.15)",
+                  background: "white",
+                  boxShadow: "0 2px 6px rgba(0,0,0,.06)",
+                  cursor: "pointer",
+                  transition: "transform .06s ease",
+                  opacity: (() => {
+                    const q = queueRef.current;
+                    const cur = nowId ?? routeIdRef.current ?? "";
+                    const i = q.indexOf(cur);
+                    return i >= 0 && i < q.length - 1 ? 1 : 0.5;
+                  })(),
+                  pointerEvents: (() => {
+                    const q = queueRef.current;
+                    const cur = nowId ?? routeIdRef.current ?? "";
+                    const i = q.indexOf(cur);
+                    return i >= 0 && i < q.length - 1 ? "auto" : "none";
+                  })(),
+                }}
+                onMouseDown={(e) =>
+                  (e.currentTarget.style.transform = "scale(0.96)")
+                }
+                onMouseUp={(e) =>
+                  (e.currentTarget.style.transform = "scale(1)")
+                }
+                onMouseLeave={(e) =>
+                  (e.currentTarget.style.transform = "scale(1)")
+                }
+              >
+                {/* 右二重矢印 */}
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M13 6l6 6-6 6"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M5 6l6 6-6 6"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
               </button>
             </div>
           </div>

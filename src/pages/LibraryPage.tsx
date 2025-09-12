@@ -23,6 +23,7 @@ export default function LibraryPage() {
     getDuration: (t) => t.meta?.durationSec,
     defaultWindowSec: 30,
   });
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   const ingestFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -70,8 +71,39 @@ export default function LibraryPage() {
     [handlePreviewClickById]
   );
 
+  // 選択トグル
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  }, []);
+
+  // 選択解除
+  const clearSelection = useCallback(() => setSelectedIds([]), []);
+
+  // 「選択をプレイヤーで再生」
+  const playSelected = async () => {
+    if (!selectedIds.length) return;
+    const dedup = Array.from(new Set(selectedIds));
+    sessionStorage.setItem("queue", dedup.join(","));
+    try {
+      await engine.enable();
+    } catch {}
+    nav(`/play/${dedup[0]}`); // ここは既存ルートに合わせて
+  };
+
   const now = currentIndex != null ? tracks[currentIndex] : null;
   const stop = useCallback(() => engine.stop(), [engine]);
+
+  const haltPropagation = (e: React.SyntheticEvent) => {
+    e.stopPropagation();
+  };
+
+  const blockNavAndPropagation = (e: React.MouseEvent | React.PointerEvent) => {
+    // 行が <Link> 包装の場合のナビ抑止に使う
+    e.preventDefault();
+    e.stopPropagation();
+  };
 
   return (
     <>
@@ -154,6 +186,18 @@ export default function LibraryPage() {
             }}
           />
         </label>
+
+        <button
+          onClick={playSelected}
+          disabled={selectedIds.length === 0}
+          title="選んだ曲をプレイヤーで順番に再生"
+        >
+          ▶ 選択をプレイヤーで再生（{selectedIds.length}）
+        </button>
+
+        <button onClick={clearSelection} disabled={selectedIds.length === 0}>
+          選択解除
+        </button>
 
         {!enabled && (
           <button onClick={enableSound}>🔊 サウンド有効化（初回）</button>
@@ -349,6 +393,31 @@ export default function LibraryPage() {
                       {t.meta?.album ? ` – ${t.meta.album}` : ""}
                     </div>
                   </div>
+                </div>
+
+                <div
+                  data-no-nav // 親のガード用フラグ
+                  onClick={blockNavAndPropagation} // Link遷移を確実にブロック（Linkで包んでる場合）
+                  onPointerDown={blockNavAndPropagation} // 早期に止める（モバイルも安定）
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 8,
+                  }}
+                >
+                  <label
+                    onClick={haltPropagation}
+                    onPointerDown={haltPropagation}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.includes(t.id)}
+                      onChange={() => toggleSelect(t.id)}
+                      onClick={haltPropagation} // 親の onClick に届かせない
+                      onPointerDown={haltPropagation}
+                    />
+                    <span>リストに追加</span>
+                  </label>
                 </div>
 
                 {/* ▶︎ プレビュー */}
