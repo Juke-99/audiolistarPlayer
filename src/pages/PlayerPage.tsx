@@ -3,15 +3,14 @@ import { useTracks } from "../contexts/TrackContext";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import BackgroundWave from "../components/BackgroundWave";
 import { useEngine } from "../contexts/EngineContext";
-
-function formatTime(sec: number) {
-  if (!Number.isFinite(sec)) return "0:00";
-  const m = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
+import PlayerCard from "../components/PlayCard";
+import GhostPlayerCard from "../components/GhostPlayerCard";
 
 export default function PlayerPage() {
+  const VISIBLE = 6; // 最大表示枚数
+  const SHIFT_X = 18; // 右方向のずらし(px)
+  const SHIFT_Y = 18; // 上方向のずらし(px)
+
   const { id } = useParams();
   const nav = useNavigate();
   const engine = useEngine();
@@ -19,6 +18,25 @@ export default function PlayerPage() {
   const { search } = useLocation();
 
   const [nowId, setNowId] = useState<string | null>(null);
+  const [bufferedPct] = useState(0);
+
+  // 再生状態（エンジンから購読）
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState<number>(NaN);
+  const [paused, setPaused] = useState(true);
+  const [, setBuffered] = useState<{ start: number; end: number }[]>([]);
+
+  const advancedRef = useRef<string | null>(null);
+  const routeIdRef = useRef<string | null>(null);
+  const endGuardRef = useRef(false);
+
+  // 現在のID / キュー / インデックスを参照するためのref（イベント内で安定して使う）
+  const idRef = useRef<string | null>(null);
+  const queueRef = useRef<string[]>([]);
+  const indexRef = useRef<number>(-1);
+
+  // ★ パレットは安定参照に（点滅防止）
+  const wavePalette = useMemo(() => ["#fca5a5", "#93c5fd", "#86efac"], []);
 
   const queueIds = useMemo(() => {
     const fromUrl = new URLSearchParams(search).get("queue") || "";
@@ -33,11 +51,13 @@ export default function PlayerPage() {
     const seen = new Set<string>();
     const valid = new Set(tracks.map((t) => t.id));
     const dedupFiltered: string[] = [];
+
     for (const x of arr)
       if (!seen.has(x) && valid.has(x)) {
         seen.add(x);
         dedupFiltered.push(x);
       }
+
     // キューが空なら、現在の曲のみ（単曲再生）
     return dedupFiltered.length ? dedupFiltered : id ? [id] : [];
   }, [search, tracks, id]);
@@ -55,6 +75,7 @@ export default function PlayerPage() {
     const valid = new Set(tracks.map((t) => t.id));
     const seen = new Set<string>();
     const out: string[] = [];
+
     for (const x of arr)
       if (!seen.has(x) && valid.has(x)) {
         seen.add(x);
@@ -65,10 +86,21 @@ export default function PlayerPage() {
     return out.length ? out : id ? [id] : [];
   }, [search, tracks, id]);
 
-  // 現在のID / キュー / インデックスを参照するためのref（イベント内で安定して使う）
-  const idRef = useRef<string | null>(null);
-  const queueRef = useRef<string[]>([]);
-  const indexRef = useRef<number>(-1);
+  // スタック表示用（現在→次…のみを並べる）
+  const stackIds = useMemo(() => {
+    if (!queueIds.length) return nowId ? [nowId] : [];
+
+    const cur = nowId ?? id ?? queueIds[0];
+    const i = queueIds.indexOf(cur);
+
+    return i >= 0 ? queueIds.slice(i) : queueIds;
+  }, [queueIds, nowId, id]);
+
+  const effectiveId = nowId ?? id ?? null;
+  const track = useMemo(
+    () => (effectiveId ? tracks.find((t) => t.id === effectiveId) : tracks[0]),
+    [tracks, effectiveId]
+  );
 
   // キューと現在IDが変わったときにrefを更新
   useEffect(() => {
@@ -86,25 +118,6 @@ export default function PlayerPage() {
       </div>
     );
   }
-
-  const effectiveId = nowId ?? id ?? null;
-  const track = useMemo(
-    () => (effectiveId ? tracks.find((t) => t.id === effectiveId) : tracks[0]),
-    [tracks, effectiveId]
-  );
-
-  // 再生状態（エンジンから購読）
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState<number>(NaN);
-  const [paused, setPaused] = useState(true);
-  const [buffered, setBuffered] = useState<{ start: number; end: number }[]>(
-    []
-  );
-
-  // ★ パレットは安定参照に（点滅防止）
-  const wavePalette = useMemo(() => ["#fca5a5", "#93c5fd", "#86efac"], []);
-
-  const advancedRef = useRef<string | null>(null);
 
   useEffect(() => {
     // 時間/状態の購読
@@ -130,6 +143,7 @@ export default function PlayerPage() {
     const valid = new Set(tracks.map((t) => t.id));
     const seen = new Set<string>();
     const q: string[] = [];
+
     for (const x of raw)
       if (valid.has(x) && !seen.has(x)) {
         seen.add(x);
@@ -172,6 +186,7 @@ export default function PlayerPage() {
 
   useEffect(() => {
     if (!track) return;
+
     (async () => {
       try {
         await engine.enable();
@@ -182,6 +197,7 @@ export default function PlayerPage() {
           previewEndSec: undefined,
         });
         await ensurePlaying(); // ★ 追加
+
         setTimeout(() => {
           ensurePlaying();
         }, 50); // ★ 追加（保険）
@@ -189,15 +205,13 @@ export default function PlayerPage() {
     })();
   }, [track?.id, track?.url, engine]);
 
-  const routeIdRef = useRef<string | null>(null);
   useEffect(() => {
     routeIdRef.current = id ?? null;
   }, [id]);
 
-  const endGuardRef = useRef(false);
-
   // 操作系
   const onToggle = useCallback(() => engine.toggle(), [engine]);
+
   const onSeek = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const v = parseFloat(e.currentTarget.value);
@@ -216,68 +230,57 @@ export default function PlayerPage() {
     } catch {}
   };
 
-  // ★ 前の曲へ
-  const playPrevInQueue = useCallback(async () => {
-    const q = queueRef.current;
-    const curId = nowId ?? routeIdRef.current ?? null;
-    if (!curId) return;
+  // 任意IDへジャンプ
+  const playById = useCallback(
+    async (targetId: string) => {
+      const t = tracks.find((x) => x.id === targetId);
+      if (!t) return;
 
-    const idx = q.indexOf(curId);
-    const prevId = idx > 0 ? q[idx - 1] : null;
-    if (!prevId) return;
+      await engine.play({
+        id: t.id,
+        url: t.url,
+        previewStartSec: undefined,
+        previewEndSec: undefined,
+      });
+      await ensurePlaying();
 
-    const prevTrack = tracks.find((t) => t.id === prevId);
-    if (!prevTrack) return;
+      setTimeout(() => {
+        ensurePlaying();
+      }, 60);
+    },
+    [engine, tracks, ensurePlaying]
+  );
 
-    // 切替（フェードさせたいなら先に await engine.stop()）
-    await engine.play({
-      id: prevTrack.id,
-      url: prevTrack.url,
-      previewStartSec: undefined,
-      previewEndSec: undefined,
-    });
-    await ensurePlaying();
-    setTimeout(() => {
-      ensurePlaying();
-    }, 50);
-  }, [engine, tracks, nowId]);
-
+  // 前/次へ
   const playNextInQueue = useCallback(async () => {
-    const q = queueRef.current;
-    const curId = nowId ?? routeIdRef.current ?? null;
-    if (!curId) return;
+    if (!queueIds.length) return;
 
-    const idx = q.indexOf(curId);
-    const nextId = idx >= 0 ? q[idx + 1] : null;
-    if (!nextId) return;
+    const cur = nowId ?? routeIdRef.current ?? queueIds[0];
+    const i = queueIds.indexOf(cur ?? "");
+    const nextId = i >= 0 ? queueIds[i + 1] : undefined;
 
-    const nextTrack = tracks.find((t) => t.id === nextId);
-    if (!nextTrack) return;
+    if (nextId) await playById(nextId);
+  }, [queueIds, nowId, playById]);
 
-    // 1) セットして
-    await engine.play({
-      id: nextTrack.id,
-      url: nextTrack.url,
-      previewStartSec: undefined,
-      previewEndSec: undefined,
-    });
+  const playPrevInQueue = useCallback(async () => {
+    if (!queueIds.length) return;
 
-    // 2) すぐ再生開始を強制
-    await ensurePlaying();
+    const cur = nowId ?? routeIdRef.current ?? queueIds[0];
+    const i = queueIds.indexOf(cur ?? "");
+    const prevId = i > 0 ? queueIds[i - 1] : undefined;
 
-    // 3) 念のため少し後でもう一度（ブラウザのreadyタイミング対策）
-    setTimeout(() => {
-      ensurePlaying();
-    }, 50);
-  }, [engine, tracks, nowId]);
+    if (prevId) await playById(prevId);
+  }, [queueIds, nowId, playById]);
 
   useEffect(() => {
     const off = engine.onPreviewEnd?.(({ reason }) => {
       if (reason !== "ended") return; // プレビューは連続させない場合
       if (endGuardRef.current) return;
+
       endGuardRef.current = true;
       playNextInQueue();
     });
+
     return () => {
       off && off();
       endGuardRef.current = false;
@@ -287,42 +290,6 @@ export default function PlayerPage() {
   useEffect(() => {
     endGuardRef.current = false;
   }, [nowId]);
-
-  const title =
-    track?.meta?.title ??
-    track?.file?.name?.replace(/\.[^.]+$/, "") ??
-    "Unknown";
-  const sub =
-    (track?.meta?.artist ?? "Unknown Artist") +
-    (track?.meta?.album ? ` – ${track?.meta?.album}` : "");
-  const pct =
-    Number.isFinite(duration) && duration > 0
-      ? (currentTime / duration) * 100
-      : 0;
-
-  // バッファ済み・再生済みの表示用スタイル
-  const bufferedBars =
-    Number.isFinite(duration) && duration > 0
-      ? buffered.map((r, i) => {
-          const left = Math.max(0, Math.min(100, (r.start / duration) * 100));
-          const right = Math.max(0, Math.min(100, (r.end / duration) * 100));
-          const width = Math.max(0, right - left);
-
-          return (
-            <div
-              key={i}
-              style={{
-                position: "absolute",
-                left: `${left}%`,
-                width: `${width}%`,
-                top: 0,
-                bottom: 0,
-                background: "rgba(0,0,0,0.18)", // バッファ済みは薄め
-              }}
-            />
-          );
-        })
-      : null;
 
   return (
     <>
@@ -341,6 +308,7 @@ export default function PlayerPage() {
             try {
               engine.pause();
             } catch {}
+
             // 履歴があれば戻る。無ければライブラリへ
             if (window.history.length > 1) nav(-1);
             else nav("/");
@@ -382,7 +350,7 @@ export default function PlayerPage() {
         </button>
       </div>
 
-      {/* 中央配置 */}
+      {/* 中央配置（スタック表示に置換） */}
       <div
         style={{
           position: "relative",
@@ -394,279 +362,92 @@ export default function PlayerPage() {
           color: "#111",
         }}
       >
+        {/* ★ここがスタックコンテナ（大枠カードを重ねる）★ */}
         <div
           style={{
+            position: "relative",
             width: "min(96vw, 1100px)",
-            display: "grid",
-            gap: 18,
-            background: "rgba(255,255,255,0.65)",
-            backdropFilter: "blur(6px)",
-            border: "1px solid rgba(0,0,0,0.05)",
-            borderRadius: 16,
-            boxShadow: "0 12px 32px rgba(0,0,0,0.12)",
-            padding: 18,
-            gridTemplateColumns: "1.3fr 1fr",
-            alignItems: "center",
-            transform: "translateY(-25px)",
+            height: 640,
+            paddingTop:
+              Math.max(0, (Math.min(stackIds.length, VISIBLE) - 1) * SHIFT_Y) +
+              8,
+            paddingRight:
+              Math.max(0, (Math.min(stackIds.length, VISIBLE) - 1) * SHIFT_X) +
+              8,
+            overflow: "visible",
           }}
         >
-          {/* 左：アートワーク */}
-          <div style={{ display: "grid", placeItems: "center" }}>
-            <div
-              style={{
-                position: "relative",
-                width: "clamp(280px, 48vw, 560px)",
-                aspectRatio: "1 / 1",
-                borderRadius: 16,
-                overflow: "hidden",
-                background: "#f3f4f6",
-                boxShadow: "0 12px 32px rgba(0,0,0,0.14)",
-              }}
-              title={title}
-            >
-              {track?.meta?.pictureUrl ? (
-                <img
-                  src={track.meta.pictureUrl}
-                  alt=""
-                  style={{
-                    width: "100%",
-                    height: "100%",
-                    objectFit: "contain",
-                    backgroundColor: "#fff",
-                  }}
-                />
-              ) : (
-                <div
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    display: "grid",
-                    placeItems: "center",
-                    color: "#6b7280",
-                    background:
-                      "linear-gradient(135deg, #e5e7eb 0%, #f3f4f6 50%, #ffffff 100%)",
-                  }}
-                >
-                  No Artwork
-                </div>
-              )}
-            </div>
-          </div>
+          {stackIds.slice(0, 6).map((tid, i) => {
+            const t = tracks.find((x) => x.id === tid);
+            if (!t) return null;
 
-          {/* 右：情報＋コントロール */}
-          <div style={{ display: "grid", gap: 14 }}>
-            {/* タイトル/アーティスト */}
-            <div>
-              <div style={{ fontSize: 14, opacity: 0.85 }}>{sub}</div>
-              <div
-                style={{
-                  fontSize: 24,
-                  fontWeight: 800,
-                  lineHeight: 1.25,
-                  marginTop: 4,
-                }}
-              >
-                {title}
-              </div>
-            </div>
+            const top = -i * SHIFT_Y; // 上へ詰める（負の top）
+            const left = i * SHIFT_X; // 右へずらす
+            const z = 100 - i;
+            const isTop = i === 0;
 
-            {/* 「再生済み/バッファ済み」を重ねた可視化バー */}
-            <div
-              style={{
-                position: "relative",
-                height: 10,
-                width: "100%",
-                background: "rgba(0,0,0,0.08)",
-                borderRadius: 9999,
-                overflow: "hidden",
-              }}
-              aria-label="buffered-and-played-visual"
-            >
-              {/* バッファ済み（複数レンジに対応） */}
-              {bufferedBars}
-              {/* 再生済み（濃い帯） */}
+            const tTitle =
+              t.meta?.title ??
+              t.file?.name?.replace(/\.[^.]+$/, "") ??
+              "Unknown";
+            const tSub =
+              (t.meta?.artist ?? "Unknown Artist") +
+              (t.meta?.album ? ` – ${t.meta.album}` : "");
+
+            return (
               <div
+                key={t.id}
                 style={{
                   position: "absolute",
-                  left: 0,
-                  top: 0,
-                  bottom: 0,
-                  width: `${pct}%`,
-                  background: "rgba(0,0,0,0.55)",
+                  top,
+                  left,
+                  width: "100%",
+                  height: "100%",
+                  zIndex: z,
                 }}
-              />
-            </div>
+              >
+                {isTop ? (
+                  <PlayerCard
+                    title={tTitle}
+                    sub={tSub}
+                    track={t}
+                    bufferedPct={bufferedPct}
+                    currentTime={currentTime}
+                    duration={duration}
+                    paused={paused}
+                    onSeek={onSeek}
+                    onToggle={onToggle}
+                    onPrev={playPrevInQueue}
+                    onNext={playNextInQueue}
+                  />
+                ) : (
+                  <GhostPlayerCard
+                    title={tTitle}
+                    sub={tSub}
+                    track={t}
+                    onJump={() => playById(t.id)}
+                  />
+                )}
+              </div>
+            );
+          })}
 
-            {/* シーク（操作用） */}
-            <input
-              type="range"
-              min={0}
-              max={Number.isFinite(duration) && duration > 0 ? duration : 0}
-              step={0.01}
-              value={Number.isFinite(currentTime) ? currentTime : 0}
-              onChange={onSeek}
-              style={{ width: "100%" }}
-            />
-
-            {/* 時間表示 */}
+          {stackIds.length > 6 && (
             <div
               style={{
-                display: "flex",
-                justifyContent: "space-between",
+                position: "absolute",
+                bottom: -10,
+                right: 0,
                 fontSize: 12,
                 opacity: 0.8,
+                padding: "2px 8px",
+                borderRadius: 9999,
+                background: "rgba(0,0,0,.06)",
               }}
             >
-              <span>{formatTime(currentTime)}</span>
-              <span>
-                {Number.isFinite(duration) ? formatTime(duration) : "--:--"}
-              </span>
+              +{stackIds.length - 6} more
             </div>
-
-            {/* コントロール */}
-            <div style={{ display: "flex", gap: 10 }}>
-              <button
-                onClick={onToggle}
-                style={{
-                  padding: "10px 14px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(0,0,0,0.15)",
-                  background: "white",
-                  fontWeight: 700,
-                }}
-                title={paused ? "再生" : "一時停止"}
-              >
-                {paused ? "▶︎ 再生" : "⏸ 一時停止"}
-              </button>
-
-              <button
-                onClick={() => engine.seek(0)}
-                style={{
-                  padding: "10px 14px",
-                  borderRadius: 12,
-                  border: "1px solid rgba(0,0,0,0.15)",
-                  background: "white",
-                }}
-                title="先頭へ"
-              >
-                ⏮ 先頭
-              </button>
-
-              <button
-                onClick={playPrevInQueue}
-                aria-label="前の曲へ"
-                title="前の曲へ（Shift+←）"
-                style={{
-                  width: 40,
-                  height: 40,
-                  borderRadius: 9999,
-                  display: "grid",
-                  placeItems: "center",
-                  border: "1px solid rgba(0,0,0,.15)",
-                  background: "white",
-                  boxShadow: "0 2px 6px rgba(0,0,0,.06)",
-                  cursor: "pointer",
-                  transition: "transform .06s ease",
-                  opacity:
-                    queueRef.current.indexOf(
-                      nowId ?? routeIdRef.current ?? ""
-                    ) > 0
-                      ? 1
-                      : 0.5,
-                  pointerEvents:
-                    queueRef.current.indexOf(
-                      nowId ?? routeIdRef.current ?? ""
-                    ) > 0
-                      ? "auto"
-                      : "none",
-                }}
-                onMouseDown={(e) =>
-                  (e.currentTarget.style.transform = "scale(0.96)")
-                }
-                onMouseUp={(e) =>
-                  (e.currentTarget.style.transform = "scale(1)")
-                }
-                onMouseLeave={(e) =>
-                  (e.currentTarget.style.transform = "scale(1)")
-                }
-              >
-                {/* 左二重矢印 */}
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-                  <path
-                    d="M11 18l-6-6 6-6"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M19 18l-6-6 6-6"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </button>
-
-              <button
-                onClick={playNextInQueue}
-                aria-label="次の曲へ"
-                title="次の曲へ（Shift+→）"
-                style={{
-                  width: 40,
-                  height: 40,
-                  borderRadius: 9999,
-                  display: "grid",
-                  placeItems: "center",
-                  border: "1px solid rgba(0,0,0,.15)",
-                  background: "white",
-                  boxShadow: "0 2px 6px rgba(0,0,0,.06)",
-                  cursor: "pointer",
-                  transition: "transform .06s ease",
-                  opacity: (() => {
-                    const q = queueRef.current;
-                    const cur = nowId ?? routeIdRef.current ?? "";
-                    const i = q.indexOf(cur);
-                    return i >= 0 && i < q.length - 1 ? 1 : 0.5;
-                  })(),
-                  pointerEvents: (() => {
-                    const q = queueRef.current;
-                    const cur = nowId ?? routeIdRef.current ?? "";
-                    const i = q.indexOf(cur);
-                    return i >= 0 && i < q.length - 1 ? "auto" : "none";
-                  })(),
-                }}
-                onMouseDown={(e) =>
-                  (e.currentTarget.style.transform = "scale(0.96)")
-                }
-                onMouseUp={(e) =>
-                  (e.currentTarget.style.transform = "scale(1)")
-                }
-                onMouseLeave={(e) =>
-                  (e.currentTarget.style.transform = "scale(1)")
-                }
-              >
-                {/* 右二重矢印 */}
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-                  <path
-                    d="M13 6l6 6-6 6"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M5 6l6 6-6 6"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </button>
-            </div>
-          </div>
+          )}
         </div>
       </div>
     </>
