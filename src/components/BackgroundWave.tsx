@@ -56,8 +56,10 @@ export default function BackgroundWave({
       const analyser = engine.getAnalyser?.();
       if (analyser) {
         // ここで毎フレーム確実に設定（初期化後でも反映される）
-        if (analyser.fftSize !== 1024) analyser.fftSize = 1024;
-        analyser.smoothingTimeConstant = 0.9;
+        if (analyser.fftSize !== 4096) analyser.fftSize = 4096;
+        analyser.smoothingTimeConstant = 0.85;
+        analyser.minDecibels = -80;
+        analyser.maxDecibels = -5;
 
         if (spectrum.length !== analyser.frequencyBinCount) {
           spectrum = new Uint8Array(analyser.frequencyBinCount);
@@ -82,8 +84,11 @@ export default function BackgroundWave({
             alphaBase: 1.0,
             alphaStep: 0.0,
             smoothing,
+            sampleRate: analyser.context.sampleRate,
+            fMin: 60, // 30 → 60（サブベースを切る、解像度問題も緩和）
+            fMax: 14000,
           },
-          frame++
+          frame++,
         );
       }
 

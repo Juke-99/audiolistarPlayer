@@ -1,12 +1,14 @@
 import { useNavigate } from "react-router-dom";
 import { useEngine } from "../contexts/EngineContext";
 import { useTracks } from "../contexts/TrackContext";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { Track } from "../types/track";
 import { ACCEPT_RE } from "../constants/const";
 import { readMeta } from "../audio/audioRender/readMeta";
 import BackgroundWave from "../components/BackgroundWave";
 import { useContinuousPreview } from "../hooks/audio/useContinuousPreview";
+
+type PreviewMap = Record<string, { start: number; end: number }>;
 
 export default function LibraryPage() {
   const nav = useNavigate();
@@ -18,12 +20,13 @@ export default function LibraryPage() {
     engine,
     getId: (t) => t.id,
     getUrl: (t) => t.url,
-    getPreviewStartSec: (t) => t.previewStartSec,
-    getPreviewEndSec: (t) => t.previewEndSec,
+    getPreviewStartSec: (t) => getPreviewStartSec(t),
+    getPreviewEndSec: (t) => getPreviewEndSec(t),
     getDuration: (t) => t.meta?.durationSec,
     defaultWindowSec: 30,
   });
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [previewMap, setPreviewMap] = useState<PreviewMap>({});
 
   const ingestFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -104,6 +107,54 @@ export default function LibraryPage() {
     e.preventDefault();
     e.stopPropagation();
   };
+
+  const getPreviewStartSec = (track: Track) => {
+    const key = track.file?.name as string | undefined;
+    const cfg = key ? previewMap[key] : undefined;
+    const start = cfg?.start ?? track.previewStartSec ?? 0;
+    const dur = track.meta?.durationSec;
+
+    if (typeof dur === "number" && isFinite(dur) && start >= dur) {
+      return Math.max(0, Math.floor(dur - 1));
+    }
+
+    return Math.max(0, start);
+  };
+
+  const getPreviewEndSec = (track: Track) => {
+    const key = track.file?.name as string | undefined;
+    const cfg = key ? previewMap[key] : undefined;
+    const fallbackStart = (track.previewStartSec ?? 0) | 0;
+    let end = (cfg?.end ?? track.previewEndSec ?? fallbackStart + 30) | 0;
+    const dur = track.meta?.durationSec;
+
+    if (typeof dur === "number" && isFinite(dur)) {
+      end = Math.min(Math.floor(dur), Math.max(0, end));
+    }
+
+    const startResolved = (cfg?.start ?? track.previewStartSec ?? 0) | 0;
+    if (end <= startResolved) end = startResolved + 1;
+
+    return end;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await fetch("/previewMap.json", { cache: "no-store" });
+        if (!res.ok) return;
+
+        const json = (await res.json()) as PreviewMap;
+        if (!cancelled) setPreviewMap(json ?? {});
+      } catch {}
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <>

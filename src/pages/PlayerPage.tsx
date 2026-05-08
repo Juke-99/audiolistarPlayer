@@ -8,8 +8,8 @@ import GhostPlayerCard from "../components/GhostPlayerCard";
 
 export default function PlayerPage() {
   const VISIBLE = 6; // 最大表示枚数
-  const SHIFT_X = 18; // 右方向のずらし(px)
-  const SHIFT_Y = 18; // 上方向のずらし(px)
+  const SHIFT_X = 13; // 右方向のずらし(px)
+  const SHIFT_Y = 13; // 上方向のずらし(px)
 
   const { id } = useParams();
   const nav = useNavigate();

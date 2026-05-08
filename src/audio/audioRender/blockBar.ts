@@ -28,6 +28,13 @@ export type BlockBarsOptions = {
   lightRiseBoost?: number;
   alphaBase?: number;
   alphaStep?: number;
+
+  // 対数周波数マッピング用
+  sampleRate?: number; // analyser.context.sampleRate を渡す
+  fMin?: number; // 既定: 30 Hz
+  fMax?: number; // 既定: min(sampleRate/2, 16000)
+  logScale?: boolean; // 既定: sampleRate が渡されていれば true
+  tiltDbPerOctave?: number; // 既定: 0（3〜6 で高音側を明るくできる）
 };
 
 const clamp = (v: number, min: number, max: number) =>
@@ -70,7 +77,7 @@ const hslaSafe = (
   s: number,
   l: number,
   a: number,
-  fb = "rgb(255,0,128)"
+  fb = "rgb(255,0,128)",
 ) => {
   const H = Math.round(clamp(safe(h, 0), 0, 360));
   const S = Math.round(clamp(safe(s, 0), 0, 100));
@@ -93,7 +100,7 @@ export function drawBlockBars(
   width: number,
   height: number,
   opt: BlockBarsOptions = {},
-  frame = 0
+  frame = 0,
 ) {
   // ----- ベース設定 -----
   const smoothing = clamp(safe(opt.smoothing ?? 0.6, 0.6), 0, 0.99);
@@ -125,7 +132,7 @@ export function drawBlockBars(
     // 従来互換
     const cfgBars = Math.max(
       8,
-      Math.floor(safe(opt.bars ?? Math.floor(width / 7), width / 7))
+      Math.floor(safe(opt.bars ?? Math.floor(width / 7), width / 7)),
     );
 
     bars = cfgBars;
@@ -134,8 +141,46 @@ export function drawBlockBars(
     barW = Math.max(1, Math.floor((width - (bars - 1) * gap) / bars));
   }
 
-  // スペクトラム縮約
-  const binsPerBar = Math.max(1, Math.floor(spectrum.length / bars));
+  // バーごとの担当ビン範囲を事前計算
+  const sr = opt.sampleRate;
+  const useLog = opt.logScale !== false && !!sr;
+  const binHz = sr ? sr / (spectrum.length * 2) : 0; // 1ビンの周波数幅
+
+  const fMin = clamp(safe(opt.fMin ?? 30, 30), 1, sr ? sr / 2 : 22000);
+  const fMaxDefault = sr ? Math.min(sr / 2, 16000) : 16000;
+  const fMax = clamp(
+    safe(opt.fMax ?? fMaxDefault, fMaxDefault),
+    fMin * 2,
+    sr ? sr / 2 : 22000,
+  );
+  const logRatio = Math.log(fMax / fMin);
+
+  const barBins: Array<[number, number, number]> = new Array(bars); // [start, end, centerHz]
+
+  if (useLog) {
+    for (let i = 0; i < bars; i++) {
+      const fLo = fMin * Math.exp((logRatio * i) / bars);
+      const fHi = fMin * Math.exp((logRatio * (i + 1)) / bars);
+      const lo = Math.min(spectrum.length - 1, Math.floor(fLo / binHz));
+      const hi = Math.min(
+        spectrum.length,
+        Math.max(lo + 1, Math.ceil(fHi / binHz)),
+      );
+
+      barBins[i] = [lo, hi, Math.sqrt(fLo * fHi)]; // 中心周波数は幾何平均
+    }
+  } else {
+    const binsPerBar = Math.max(1, Math.floor(spectrum.length / bars));
+
+    for (let i = 0; i < bars; i++) {
+      const lo = i * binsPerBar;
+      const hi = Math.min(spectrum.length, lo + binsPerBar);
+      barBins[i] = [lo, hi, 0];
+    }
+  }
+
+  // チルト（オクターブごとのゲイン補正）
+  const tilt = safe(opt.tiltDbPerOctave ?? 0, 0);
 
   // ----- カラー設定 -----
   const solid = opt.color;
@@ -156,14 +201,33 @@ export function drawBlockBars(
 
   // ----- 各バー描画 -----
   for (let i = 0; i < bars; i++) {
-    const start = i * binsPerBar;
-    const end = Math.min(spectrum.length, start + binsPerBar);
+    const [start, end, centerHz] = barBins[i];
+    let avg: number;
+    //let sum = 0;
 
-    let sum = 0;
-    for (let k = start; k < end; k++) sum += spectrum[k];
+    //for (let k = start; k < end; k++) sum += spectrum[k];
 
-    const avg = sum / (end - start); // 0..255
-    const norm = Math.pow(avg / 255, 0.82); // 0..1
+    // 担当ビンが 1 個以下なら線形補間で連続値を取り出す
+    if (useLog && centerHz > 0 && end - start <= 1 && binHz > 0) {
+      const binF = centerHz / binHz;
+      const i0 = Math.max(0, Math.min(spectrum.length - 2, Math.floor(binF)));
+      const t = binF - i0;
+      avg = spectrum[i0] * (1 - t) + spectrum[i0 + 1] * t;
+    } else {
+      // 通常の平均（複数ビン担当時）
+      let sum = 0;
+      for (let k = start; k < end; k++) sum += spectrum[k];
+      avg = sum / Math.max(1, end - start);
+    }
+
+    // オプションで高音側にゲイン補正
+    if (useLog && tilt !== 0 && centerHz > 0) {
+      const oct = Math.log2(centerHz / 1000);
+      const gain = Math.pow(10, (tilt * oct) / 20);
+      avg = clamp(avg * gain, 0, 255);
+    }
+
+    const norm = Math.pow(avg / 255, 1.1); // 0..1
     const target = norm * height;
     const prev = prevLevels[i] || 0;
     const level = prev * smoothing + target * (1 - smoothing);
