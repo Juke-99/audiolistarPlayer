@@ -14,6 +14,7 @@ import { readMeta } from "../audio/audioRender/readMeta";
 import BackgroundWave from "../components/BackgroundWave";
 import { useContinuousPreview } from "../hooks/audio/useContinuousPreview";
 import { collectDroppedFiles } from "../utils/dropEntries";
+import { db, trackToStored } from "../utils/db";
 
 type PreviewMap = Record<string, { start: number; end: number }>;
 
@@ -103,6 +104,21 @@ export default function LibraryPage() {
 
         return [...prev, ...fresh];
       });
+
+      (async () => {
+        for (const t of next) {
+          // dedup で除外された曲は既存と同一なので skip（既に DB にある）
+          const existing = await db.tracks.get(t.id).catch(() => undefined);
+          if (existing) continue;
+
+          try {
+            const stored = await trackToStored(t);
+            await db.tracks.put(stored);
+          } catch (e) {
+            console.warn(`Failed to persist track ${t.id}`, e);
+          }
+        }
+      })();
     },
     [setTracks],
   );
@@ -358,6 +374,34 @@ export default function LibraryPage() {
 
         <button onClick={stop} style={pillBtn} title="プレビュー再生を停止">
           ⏹ 停止
+        </button>
+
+        <button
+          onClick={async () => {
+            if (
+              !confirm(
+                "ライブラリの全曲を削除しますか？（永続データも消えます）",
+              )
+            )
+              return;
+            // 既存の Object URL を解放
+            tracks.forEach((t) => {
+              URL.revokeObjectURL(t.url);
+              const u = t.meta?.pictureUrl;
+              if (u && u.startsWith("blob:")) URL.revokeObjectURL(u);
+            });
+            try {
+              await db.tracks.clear();
+            } catch (e) {
+              console.warn("Failed to clear IndexedDB", e);
+            }
+            setTracks([]);
+            setSelectedIds([]);
+          }}
+          style={pillBtn}
+          title="ライブラリの全曲を削除"
+        >
+          🗑 全消去
         </button>
 
         <span style={{ opacity: 0.8 }}>
