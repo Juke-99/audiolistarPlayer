@@ -203,9 +203,6 @@ export function drawBlockBars(
   for (let i = 0; i < bars; i++) {
     const [start, end, centerHz] = barBins[i];
     let avg: number;
-    //let sum = 0;
-
-    //for (let k = start; k < end; k++) sum += spectrum[k];
 
     // 担当ビンが 1 個以下なら線形補間で連続値を取り出す
     if (useLog && centerHz > 0 && end - start <= 1 && binHz > 0) {
@@ -227,8 +224,8 @@ export function drawBlockBars(
       avg = clamp(avg * gain, 0, 255);
     }
 
-    const norm = Math.pow(avg / 255, 1.1); // 0..1
-    const target = norm * height;
+    const norm = Math.pow(avg / 255, 1.0); // 0..1
+    const target = norm * height * 1.2;
     const prev = prevLevels[i] || 0;
     const level = prev * smoothing + target * (1 - smoothing);
     prevLevels[i] = level;

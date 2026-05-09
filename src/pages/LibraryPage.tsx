@@ -1,20 +1,48 @@
 import { useNavigate } from "react-router-dom";
 import { useEngine } from "../contexts/EngineContext";
 import { useTracks } from "../contexts/TrackContext";
-import { useCallback, useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import type { Track } from "../types/track";
 import { ACCEPT_RE } from "../constants/const";
 import { readMeta } from "../audio/audioRender/readMeta";
 import BackgroundWave from "../components/BackgroundWave";
 import { useContinuousPreview } from "../hooks/audio/useContinuousPreview";
+import { collectDroppedFiles } from "../utils/dropEntries";
 
 type PreviewMap = Record<string, { start: number; end: number }>;
 
 export default function LibraryPage() {
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [previewMap, setPreviewMap] = useState<PreviewMap>({});
+  const [isDragging, setIsDragging] = useState(false);
+
+  const compatFolderInputRef = useRef<HTMLInputElement | null>(null);
+  const filesInputRef = useRef<HTMLInputElement | null>(null);
+
+  const pillBtn: CSSProperties = {
+    padding: "8px 14px",
+    borderRadius: 9999,
+    border: "1px solid rgba(0,0,0,.15)",
+    background: "white",
+    boxShadow: "0 2px 6px rgba(0,0,0,.06)",
+    cursor: "pointer",
+    fontSize: 14,
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    color: "#111",
+  };
+
   const nav = useNavigate();
   const engine = useEngine();
   const { tracks, setTracks } = useTracks();
-  const [enabled, setEnabled] = useState(false);
+
   const { currentIndex, handlePreviewClickById } = useContinuousPreview<Track>({
     tracks,
     engine,
@@ -25,8 +53,6 @@ export default function LibraryPage() {
     getDuration: (t) => t.meta?.durationSec,
     defaultWindowSec: 30,
   });
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [previewMap, setPreviewMap] = useState<PreviewMap>({});
 
   const ingestFiles = useCallback(
     async (files: FileList | File[]) => {
@@ -49,35 +75,80 @@ export default function LibraryPage() {
       }
 
       setTracks((prev) => {
-        prev.forEach((t) => {
+        // 既存トラックと name+size で重複判定
+        const existingKeys = new Set(
+          prev.map((t) => `${t.file.name}|${t.file.size}`),
+        );
+
+        const dups: Track[] = [];
+        const fresh: Track[] = [];
+
+        for (const t of next) {
+          const key = `${t.file.name}|${t.file.size}`;
+
+          if (existingKeys.has(key)) {
+            dups.push(t);
+          } else {
+            fresh.push(t);
+          }
+        }
+
+        // 重複分はメモリリーク防止のため URL 解放
+        for (const t of dups) {
           URL.revokeObjectURL(t.url);
           const u = t.meta?.pictureUrl;
 
           if (u && u.startsWith("blob:")) URL.revokeObjectURL(u);
-        });
+        }
 
-        return next;
+        return [...prev, ...fresh];
       });
     },
-    [setTracks]
+    [setTracks],
   );
 
-  const enableSound = useCallback(async () => {
-    await engine.enable();
-    setEnabled(true);
-  }, [engine]);
+  const pickFolder = useCallback(async () => {
+    try {
+      await engine.enable();
+    } catch {}
+
+    // @ts-ignore
+    if (window.showDirectoryPicker) {
+      try {
+        // @ts-ignore
+        const dirHandle = await window.showDirectoryPicker({ mode: "read" });
+        const files: File[] = [];
+        for await (const entry of dirHandle.values()) {
+          if (entry.kind === "file") {
+            const f = await entry.getFile();
+            if (ACCEPT_RE.test(f.name)) files.push(f);
+          }
+        }
+        await ingestFiles(files);
+      } catch (e) {
+        console.debug(e);
+      }
+    } else {
+      // 互換ブラウザは webkitdirectory にフォールバック
+      compatFolderInputRef.current?.click();
+    }
+  }, [engine, ingestFiles]);
+
+  const pickFiles = useCallback(() => {
+    filesInputRef.current?.click();
+  }, []);
 
   const preview = useCallback(
     async (t: Track) => {
       await handlePreviewClickById(t.id);
     },
-    [handlePreviewClickById]
+    [handlePreviewClickById],
   );
 
   // 選択トグル
   const toggleSelect = useCallback((id: string) => {
     setSelectedIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
   }, []);
 
@@ -96,17 +167,8 @@ export default function LibraryPage() {
   };
 
   const now = currentIndex != null ? tracks[currentIndex] : null;
+  const displayTrack = now ?? tracks[0] ?? null;
   const stop = useCallback(() => engine.stop(), [engine]);
-
-  const haltPropagation = (e: React.SyntheticEvent) => {
-    e.stopPropagation();
-  };
-
-  const blockNavAndPropagation = (e: React.MouseEvent | React.PointerEvent) => {
-    // 行が <Link> 包装の場合のナビ抑止に使う
-    e.preventDefault();
-    e.stopPropagation();
-  };
 
   const getPreviewStartSec = (track: Track) => {
     const key = track.file?.name as string | undefined;
@@ -156,9 +218,91 @@ export default function LibraryPage() {
     };
   }, []);
 
+  useEffect(() => {
+    let counter = 0;
+    const hasFiles = (e: DragEvent) => e.dataTransfer?.types?.includes("Files");
+
+    const onDragEnter = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+
+      e.preventDefault();
+      counter++;
+
+      if (counter === 1) setIsDragging(true);
+    };
+
+    const onDragOver = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault(); // これを止めるとドロップが発火しない
+    };
+
+    const onDragLeave = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+
+      counter--;
+
+      if (counter <= 0) {
+        counter = 0;
+        setIsDragging(false);
+      }
+    };
+
+    const onDrop = async (e: DragEvent) => {
+      if (!e.dataTransfer) return;
+
+      e.preventDefault();
+      counter = 0;
+      setIsDragging(false);
+
+      const files = await collectDroppedFiles(e.dataTransfer.items);
+
+      if (files.length) {
+        try {
+          await engine.enable();
+        } catch {}
+
+        await ingestFiles(files);
+      }
+    };
+
+    window.addEventListener("dragenter", onDragEnter);
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("dragleave", onDragLeave);
+    window.addEventListener("drop", onDrop);
+
+    return () => {
+      window.removeEventListener("dragenter", onDragEnter);
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("dragleave", onDragLeave);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, [engine, ingestFiles]);
+
   return (
     <>
       <BackgroundWave white />
+
+      {isDragging && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 16,
+            zIndex: 100,
+            borderRadius: 16,
+            background: "rgba(59,130,246,0.12)",
+            border: "3px dashed rgba(59,130,246,0.8)",
+            pointerEvents: "none",
+            display: "grid",
+            placeItems: "center",
+            color: "#1e3a8a",
+            fontSize: 22,
+            fontWeight: 800,
+            backdropFilter: "blur(2px)",
+          }}
+        >
+          📂 ここにドロップで取り込み
+        </div>
+      )}
 
       {/* ツールバー */}
       <div
@@ -173,90 +317,100 @@ export default function LibraryPage() {
           color: "#111",
         }}
       >
-        <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          📁 フォルダ選択（互換）
-          <input
-            type="file"
-            style={{ display: "none" }}
-            // @ts-ignore
-            webkitdirectory="true"
-            multiple
-            accept=".mp3,.m4a,.aac,.wav,.flac,.ogg"
-            onChange={async (e) => {
-              if (e.currentTarget.files) {
-                await ingestFiles(e.currentTarget.files);
-                await engine.enable();
-              }
-
-              e.currentTarget.value = "";
-            }}
-          />
-        </label>
-
-        <button
-          onClick={async () => {
-            // @ts-ignore
-            if (!window.showDirectoryPicker) {
-              alert(
-                "このブラウザは File System Access API に未対応です。『フォルダ選択（互換）』を使ってください。"
-              );
-              return;
-            }
-            try {
-              // @ts-ignore
-              const dirHandle = await window.showDirectoryPicker({
-                mode: "read",
-              });
-              const files: File[] = [];
-              for await (const entry of dirHandle.values()) {
-                if (entry.kind === "file") {
-                  const f = await entry.getFile();
-                  if (ACCEPT_RE.test(f.name)) files.push(f);
-                }
-              }
-              await ingestFiles(files);
-              await engine.enable();
-            } catch (e) {
-              console.debug(e);
-            }
-          }}
-        >
-          📂 フォルダ選択（高速・推奨）
+        <button onClick={pickFolder} style={pillBtn}>
+          📁 フォルダから取り込む
         </button>
 
-        <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          🎵 ファイル選択
-          <input
-            type="file"
-            style={{ display: "none" }}
-            multiple
-            accept=".mp3,.m4a,.aac,.wav,.flac,.ogg"
-            onChange={(e) => {
-              if (e.currentTarget.files) ingestFiles(e.currentTarget.files);
-              e.currentTarget.value = "";
-            }}
-          />
-        </label>
-
-        <button
-          onClick={playSelected}
-          disabled={selectedIds.length === 0}
-          title="選んだ曲をプレイヤーで順番に再生"
-        >
-          ▶ 選択をプレイヤーで再生（{selectedIds.length}）
+        <button onClick={pickFiles} style={pillBtn}>
+          🎵 ファイルから取り込む
         </button>
 
-        <button onClick={clearSelection} disabled={selectedIds.length === 0}>
-          選択解除
-        </button>
+        {selectedIds.length > 0 && (
+          <>
+            <div
+              style={{
+                width: 1,
+                height: 24,
+                background: "rgba(0,0,0,.1)",
+                margin: "0 4px",
+              }}
+            />
 
-        {!enabled && (
-          <button onClick={enableSound}>🔊 サウンド有効化（初回）</button>
+            <button
+              onClick={playSelected}
+              style={{
+                ...pillBtn,
+                background: "#111",
+                color: "white",
+                borderColor: "#111",
+              }}
+              title="選んだ曲をプレイヤーで順番に再生"
+            >
+              ▶ プレイヤーで再生（{selectedIds.length}）
+            </button>
+            <button onClick={clearSelection} style={pillBtn}>
+              選択解除
+            </button>
+          </>
         )}
-        <button onClick={stop}>⏹ 停止</button>
+
+        <div style={{ flex: 1 }} />
+
+        <button onClick={stop} style={pillBtn} title="プレビュー再生を停止">
+          ⏹ 停止
+        </button>
+
         <span style={{ opacity: 0.8 }}>
           クリックでフル再生画面に遷移 / ▶︎でプレビュー
         </span>
+
+        <input
+          ref={compatFolderInputRef}
+          type="file"
+          style={{ display: "none" }}
+          // @ts-ignore
+          webkitdirectory="true"
+          multiple
+          accept=".mp3,.m4a,.aac,.wav,.flac,.ogg"
+          onChange={async (e) => {
+            const filesArr = e.currentTarget.files
+              ? Array.from(e.currentTarget.files)
+              : [];
+
+            e.currentTarget.value = "";
+
+            if (filesArr.length) {
+              try {
+                await engine.enable();
+              } catch {}
+
+              await ingestFiles(filesArr);
+            }
+          }}
+        />
+
+        <input
+          ref={filesInputRef}
+          type="file"
+          style={{ display: "none" }}
+          multiple
+          accept=".mp3,.m4a,.aac,.wav,.flac,.ogg"
+          onChange={async (e) => {
+            const filesArr = e.currentTarget.files
+              ? Array.from(e.currentTarget.files)
+              : [];
+
+            e.currentTarget.value = ""; // 先に同期で空に
+
+            if (filesArr.length) {
+              try {
+                await engine.enable();
+              } catch {}
+
+              await ingestFiles(filesArr);
+            }
+          }}
+        />
       </div>
 
       {/* 2カラム */}
@@ -294,9 +448,9 @@ export default function LibraryPage() {
               boxShadow: "0 8px 24px rgba(0,0,0,0.12)",
             }}
           >
-            {tracks[0]?.meta?.pictureUrl ? (
+            {displayTrack?.meta?.pictureUrl ? (
               <img
-                src={tracks[0].meta!.pictureUrl!}
+                src={displayTrack.meta.pictureUrl}
                 alt=""
                 style={{
                   width: "100%",
@@ -321,18 +475,12 @@ export default function LibraryPage() {
           </div>
 
           <h2 style={{ margin: 0, fontSize: 24, fontWeight: 800 }}>
-            {now?.meta?.title ??
-              now?.file.name ??
-              tracks[0]?.meta?.title ??
-              tracks[0]?.file.name ??
-              "No Track"}
+            {displayTrack?.meta?.title ?? displayTrack?.file.name ?? "No Track"}
           </h2>
           <div style={{ fontSize: 14, opacity: 0.8 }}>
-            {(now?.meta?.artist ??
-              tracks[0]?.meta?.artist ??
-              "Unknown Artist") +
-              (now?.meta?.album ?? tracks[0]?.meta?.album
-                ? ` – ${now?.meta?.album ?? tracks[0]?.meta?.album}`
+            {(displayTrack?.meta?.artist ?? "Unknown Artist") +
+              (displayTrack?.meta?.album
+                ? ` – ${displayTrack.meta.album}`
                 : "")}
           </div>
         </section>
@@ -354,135 +502,194 @@ export default function LibraryPage() {
               maxHeight: "calc(100vh - 220px)",
             }}
           >
-            {tracks.map((t) => (
-              <li
-                key={t.id}
-                role="option"
-                tabIndex={0}
-                onClick={async () => {
-                  await engine.enable(); // ← クリック(ユーザー操作)内で許可
-                  engine.play({ id: t.id, url: t.url }); // ← プレビューではなくフル再生
-                  nav(`/play/${t.id}`); // ← そのまま遷移
-                }}
-                onKeyDown={async (e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    await engine.enable();
-                    engine.play({ id: t.id, url: t.url });
-                    nav(`/play/${t.id}`);
-                  }
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 12,
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  background: "rgba(0,0,0,0.04)",
-                  cursor: "pointer",
-                }}
-                title="クリックでフル再生画面へ"
-              >
-                <div
+            {tracks.map((t) => {
+              const selected = selectedIds.includes(t.id);
+
+              return (
+                <li
+                  key={t.id}
+                  role="option"
+                  aria-selected={selected}
+                  tabIndex={0}
+                  onClick={() => toggleSelect(t.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      toggleSelect(t.id);
+                    }
+                  }}
                   style={{
                     display: "flex",
-                    gap: 10,
                     alignItems: "center",
-                    minWidth: 0,
+                    justifyContent: "space-between",
+                    gap: 12,
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    background: selected
+                      ? "rgba(59,130,246,0.12)"
+                      : "rgba(0,0,0,0.04)",
+                    border: selected
+                      ? "1px solid rgba(59,130,246,0.5)"
+                      : "1px solid transparent",
+                    cursor: "pointer",
+                    transition: "background .12s ease, border-color .12s ease",
                   }}
+                  title={
+                    selected
+                      ? "クリックで選択を解除"
+                      : "クリックでプレイリストに追加"
+                  }
                 >
-                  {t.meta?.pictureUrl ? (
-                    <img
-                      src={t.meta.pictureUrl}
-                      alt=""
-                      width={44}
-                      height={44}
-                      style={{
-                        borderRadius: 8,
-                        objectFit: "cover",
-                        flex: "0 0 auto",
-                      }}
-                    />
-                  ) : (
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 10,
+                      alignItems: "center",
+                      minWidth: 0,
+                      flex: 1,
+                    }}
+                  >
+                    {/* 選択インジケータ */}
                     <div
+                      aria-hidden
                       style={{
-                        width: 44,
-                        height: 44,
-                        borderRadius: 8,
-                        background: "rgba(0,0,0,0.06)",
-                        flex: "0 0 auto",
+                        width: 18,
+                        height: 18,
+                        borderRadius: 6,
+                        border: selected
+                          ? "2px solid rgba(59,130,246,0.95)"
+                          : "2px solid rgba(0,0,0,0.25)",
+                        background: selected
+                          ? "rgba(59,130,246,0.95)"
+                          : "transparent",
+                        color: "white",
                         display: "grid",
                         placeItems: "center",
-                        fontSize: 11,
-                        color: "#6b7280",
+                        fontSize: 10,
+                        fontWeight: 800,
+                        flex: "0 0 auto",
                       }}
                     >
-                      No Art
+                      {selected ? "✓" : ""}
                     </div>
-                  )}
-                  <div style={{ minWidth: 0 }}>
-                    <div
-                      style={{
-                        fontWeight: 700,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {t.meta?.title ?? t.file.name.replace(/\.[^.]+$/, "")}
-                    </div>
-                    <div
-                      style={{
-                        opacity: 0.85,
-                        fontSize: 12,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {t.meta?.artist ?? "Unknown Artist"}
-                      {t.meta?.album ? ` – ${t.meta.album}` : ""}
+
+                    {t.meta?.pictureUrl ? (
+                      <img
+                        src={t.meta.pictureUrl}
+                        alt=""
+                        width={44}
+                        height={44}
+                        style={{
+                          borderRadius: 8,
+                          objectFit: "cover",
+                          flex: "0 0 auto",
+                        }}
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          width: 44,
+                          height: 44,
+                          borderRadius: 8,
+                          background: "rgba(0,0,0,0.06)",
+                          flex: "0 0 auto",
+                          display: "grid",
+                          placeItems: "center",
+                          fontSize: 11,
+                          color: "#6b7280",
+                        }}
+                      >
+                        No Art
+                      </div>
+                    )}
+                    <div style={{ minWidth: 0 }}>
+                      <div
+                        style={{
+                          fontWeight: 700,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {t.meta?.title ?? t.file.name.replace(/\.[^.]+$/, "")}
+                      </div>
+                      <div
+                        style={{
+                          opacity: 0.85,
+                          fontSize: 12,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {t.meta?.artist ?? "Unknown Artist"}
+                        {t.meta?.album ? ` – ${t.meta.album}` : ""}
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                <div
-                  data-no-nav // 親のガード用フラグ
-                  onClick={blockNavAndPropagation} // Link遷移を確実にブロック（Linkで包んでる場合）
-                  onPointerDown={blockNavAndPropagation} // 早期に止める（モバイルも安定）
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 8,
-                  }}
-                >
-                  <label
-                    onClick={haltPropagation}
-                    onPointerDown={haltPropagation}
+                  {/* 操作ボタン群（行クリックを発火させない） */}
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      flex: "0 0 auto",
+                    }}
                   >
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.includes(t.id)}
-                      onChange={() => toggleSelect(t.id)}
-                      onClick={haltPropagation} // 親の onClick に届かせない
-                      onPointerDown={haltPropagation}
-                    />
-                    <span>リストに追加</span>
-                  </label>
-                </div>
+                    {/* プレビュー試聴 */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        preview(t);
+                      }}
+                      title="プレビュー試聴"
+                      style={{
+                        width: 36,
+                        height: 36,
+                        borderRadius: 9999,
+                        border: "1px solid rgba(0,0,0,0.15)",
+                        background: "white",
+                        cursor: "pointer",
+                        fontSize: 14,
+                      }}
+                    >
+                      ▶︎
+                    </button>
 
-                {/* ▶︎ プレビュー */}
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    preview(t);
-                  }}
-                  title="プレビュー"
-                >
-                  ▶︎
-                </button>
-              </li>
-            ))}
+                    {/* この曲だけプレイヤーで再生 */}
+                    <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        try {
+                          await engine.enable();
+                        } catch {}
+                        sessionStorage.setItem("queue", t.id);
+                        engine.play({ id: t.id, url: t.url });
+                        nav(`/play/${t.id}`);
+                      }}
+                      title="この曲をプレイヤーで再生"
+                      style={{
+                        height: 36,
+                        padding: "0 12px",
+                        borderRadius: 9999,
+                        border: "1px solid rgba(0,0,0,0.15)",
+                        background: "white",
+                        cursor: "pointer",
+                        fontSize: 13,
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 4,
+                      }}
+                    >
+                      ▶ 再生
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </section>
       </div>
