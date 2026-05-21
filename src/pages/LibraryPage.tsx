@@ -14,7 +14,9 @@ import { readMeta } from "../audio/audioRender/readMeta";
 import BackgroundWave from "../components/BackgroundWave";
 import { useContinuousPreview } from "../hooks/audio/useContinuousPreview";
 import { collectDroppedFiles } from "../utils/dropEntries";
-import { db, trackToStored } from "../utils/db";
+import { db, saveLyrics, trackToStored } from "../utils/db";
+import type { EmbeddedLyrics } from "../utils/extractEmbeddedLyrics";
+import { serializeLrc } from "../utils/lrc";
 
 type PreviewMap = Record<string, { start: number; end: number }>;
 
@@ -63,17 +65,23 @@ export default function LibraryPage() {
         if (!ACCEPT_RE.test(f.name)) continue;
 
         const url = URL.createObjectURL(f);
-        const meta = await readMeta(f);
+        const { meta, embeddedLyrics } = await readMeta(f);
+        const id = crypto.randomUUID();
 
         next.push({
-          id: crypto.randomUUID(),
+          id,
           file: f,
           url,
           meta,
           previewStartSec: 45,
           previewEndSec: 75,
         });
+
+        // 埋め込み歌詞があれば、後で IDB に書くために控えておく
+        (next[next.length - 1] as any).__embeddedLyrics = embeddedLyrics;
       }
+
+      let added: Track[] = [];
 
       setTracks((prev) => {
         // 既存トラックと name+size で重複判定
@@ -102,23 +110,49 @@ export default function LibraryPage() {
           if (u && u.startsWith("blob:")) URL.revokeObjectURL(u);
         }
 
+        added = fresh;
         return [...prev, ...fresh];
       });
 
-      (async () => {
-        for (const t of next) {
-          // dedup で除外された曲は既存と同一なので skip（既に DB にある）
-          const existing = await db.tracks.get(t.id).catch(() => undefined);
-          if (existing) continue;
-
-          try {
-            const stored = await trackToStored(t);
-            await db.tracks.put(stored);
-          } catch (e) {
-            console.warn(`Failed to persist track ${t.id}`, e);
-          }
+      for (const t of added) {
+        try {
+          const stored = await trackToStored(t);
+          await db.tracks.put(stored);
+        } catch (e) {
+          console.warn(`Failed to persist track ${t.id}`, e);
         }
-      })();
+
+        // ★ 追加: 歌詞の永続化
+        const emb = (t as any).__embeddedLyrics as EmbeddedLyrics | undefined;
+        if (emb) {
+          try {
+            if (emb.source === "sylt") {
+              await saveLyrics({
+                trackId: t.id,
+                source: "sylt",
+                format: emb.parsed.format,
+                content: serializeLrc(emb.parsed),
+                edited: false,
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+              });
+            } else {
+              await saveLyrics({
+                trackId: t.id,
+                source: "uslt",
+                format: "text-only",
+                content: emb.text,
+                edited: false,
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+              });
+            }
+          } catch (e) {
+            console.warn(`Failed to persist lyrics for ${t.id}`, e);
+          }
+          delete (t as any).__embeddedLyrics;
+        }
+      }
     },
     [setTracks],
   );

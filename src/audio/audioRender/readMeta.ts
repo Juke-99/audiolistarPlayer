@@ -1,4 +1,8 @@
 import {
+  extractEmbeddedLyrics,
+  type EmbeddedLyrics,
+} from "../../utils/extractEmbeddedLyrics";
+import {
   fetchArtworkByItunesIds,
   fetchArtworkByItunesSearch,
 } from "../../utils/fetchItunesArtwork";
@@ -8,6 +12,11 @@ export type ReadMetaOptions = {
   preferEmbeddedArtwork?: boolean;
   /** "jp"(既定) / "us" など */
   country?: string;
+};
+
+export type ReadMetaResult = {
+  meta: ParsedTrackMeta;
+  embeddedLyrics?: EmbeddedLyrics;
 };
 
 export type ParsedTrackMeta = {
@@ -84,8 +93,8 @@ function extractEmbeddedArtworkUrl(mm: any): string | undefined {
 // ---------- メイン ----------
 export async function readMeta(
   file: Blob | ArrayBuffer | Uint8Array,
-  opts: ReadMetaOptions = {}
-): Promise<ParsedTrackMeta> {
+  opts: ReadMetaOptions = {},
+): Promise<ReadMetaResult> {
   const preferEmbedded = opts.preferEmbeddedArtwork ?? true;
   const country = safeCountry(opts.country);
 
@@ -108,11 +117,13 @@ export async function readMeta(
       throw new Error("Unsupported input type for readMeta()");
     }
     // music-metadata の parseBuffer は第2引数に { mimeType, size } を渡す形が安全
-    mm = await parseBuffer(Buffer.from(buf), {
+    mm = await parseBuffer(buf, {
       mimeType: undefined,
       size: buf.byteLength,
     });
   }
+
+  const embeddedLyrics = extractEmbeddedLyrics(mm) ?? undefined;
 
   // 2) 共通メタを整形
   const meta: ParsedTrackMeta = {
@@ -146,7 +157,7 @@ export async function readMeta(
     if (emb) {
       meta.pictureUrl = emb;
       meta.pictureSource = "embedded";
-      return meta;
+      return { meta, embeddedLyrics };
     }
   }
 
@@ -157,14 +168,14 @@ export async function readMeta(
         collectionId: meta.itunes?.collectionId,
         trackId: meta.itunes?.trackId,
       },
-      country
+      country,
     );
     if (byId?.url) {
       meta.pictureUrl = byId.url;
       meta.pictureSource = meta.itunes?.collectionId
         ? "itunes-collectionId"
         : "itunes-trackId";
-      return meta;
+      return { meta, embeddedLyrics };
     }
   }
 
@@ -176,12 +187,12 @@ export async function readMeta(
     title,
     artist,
     album,
-    country
+    country,
   );
   if (bySearch?.url) {
     meta.pictureUrl = bySearch.url;
     meta.pictureSource = "itunes-search";
-    return meta;
+    return { meta, embeddedLyrics };
   }
 
   // 6) 外部で見つからず、外部優先だった場合は最後に埋め込みをもう一度
@@ -193,5 +204,5 @@ export async function readMeta(
     }
   }
 
-  return meta;
+  return { meta, embeddedLyrics };
 }

@@ -5,6 +5,7 @@ import BackgroundWave from "../components/BackgroundWave";
 import { useEngine } from "../contexts/EngineContext";
 import PlayerCard from "../components/PlayCard";
 import GhostPlayerCard from "../components/GhostPlayerCard";
+import LyricsPanel from "../components/LyricsPanel";
 
 export default function PlayerPage() {
   const VISIBLE = 6; // 最大表示枚数
@@ -25,6 +26,7 @@ export default function PlayerPage() {
   const [duration, setDuration] = useState<number>(NaN);
   const [paused, setPaused] = useState(true);
   const [, setBuffered] = useState<{ start: number; end: number }[]>([]);
+  const [showLyrics, setShowLyrics] = useState(false);
 
   const advancedRef = useRef<string | null>(null);
   const routeIdRef = useRef<string | null>(null);
@@ -99,7 +101,7 @@ export default function PlayerPage() {
   const effectiveId = nowId ?? id ?? null;
   const track = useMemo(
     () => (effectiveId ? tracks.find((t) => t.id === effectiveId) : tracks[0]),
-    [tracks, effectiveId]
+    [tracks, effectiveId],
   );
 
   // キューと現在IDが変わったときにrefを更新
@@ -217,7 +219,7 @@ export default function PlayerPage() {
       const v = parseFloat(e.currentTarget.value);
       engine.seek(v);
     },
-    [engine]
+    [engine],
   );
 
   const ensurePlaying = async () => {
@@ -248,7 +250,7 @@ export default function PlayerPage() {
         ensurePlaying();
       }, 60);
     },
-    [engine, tracks, ensurePlaying]
+    [engine, tracks, ensurePlaying],
   );
 
   // 前/次へ
@@ -347,6 +349,30 @@ export default function PlayerPage() {
               strokeLinejoin="round"
             />
           </svg>
+        </button>
+
+        <button
+          onClick={() => setShowLyrics((v) => !v)}
+          aria-label="歌詞表示切り替え"
+          title={showLyrics ? "歌詞を閉じる" : "歌詞を表示"}
+          style={{
+            marginLeft: 8,
+            height: 40,
+            padding: "0 14px",
+            borderRadius: 9999,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            border: "1px solid rgba(0,0,0,.15)",
+            background: showLyrics ? "#111" : "white",
+            color: showLyrics ? "white" : "#111",
+            boxShadow: "0 2px 6px rgba(0,0,0,.06)",
+            cursor: "pointer",
+            fontSize: 14,
+            fontWeight: 700,
+          }}
+        >
+          歌詞
         </button>
       </div>
 
@@ -450,6 +476,29 @@ export default function PlayerPage() {
           )}
         </div>
       </div>
+
+      {showLyrics && (
+        <div
+          style={{
+            position: "fixed",
+            top: 72, // ヘッダーの下
+            right: 16,
+            bottom: 16,
+            width: "min(38vw, 420px)",
+            zIndex: 5, // カード(zIndex:1) より前、ヘッダー(zIndex:2) と同等以上
+            borderRadius: 16,
+            overflow: "hidden",
+            boxShadow: "0 8px 32px rgba(0,0,0,0.16)",
+            animation: "lyricsFadeIn 0.3s ease",
+          }}
+        >
+          <LyricsPanel
+            trackId={effectiveId}
+            currentTime={currentTime}
+            onSeek={(t) => engine.seek(t)}
+          />
+        </div>
+      )}
     </>
   );
 }

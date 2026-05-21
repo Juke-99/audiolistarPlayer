@@ -1,6 +1,7 @@
 import Dexie, { type Table } from "dexie";
 import type { Track } from "../types/track";
 import type { ParsedTrackMeta } from "../audio/audioRender/readMeta";
+import type { ParsedLrc } from "./lrc";
 
 /** 永続化用：埋め込みアートを Blob で保持 */
 type StoredMeta = Omit<ParsedTrackMeta, "pictureUrl"> & {
@@ -9,6 +10,24 @@ type StoredMeta = Omit<ParsedTrackMeta, "pictureUrl"> & {
   /** 埋め込みアートは Blob で保存（Object URL は揮発するため） */
   pictureBlob?: Blob;
   pictureMime?: string;
+};
+
+export type LyricsSource =
+  | "sylt" // mp3 埋め込み同期歌詞
+  | "uslt" // mp3 埋め込み無同期歌詞
+  | "lrc-file" // ユーザー提供 .lrc
+  | "ai-generated" // AI 生成
+  | "manual-edited"; // 上記のいずれかを手で編集
+
+export type StoredLyrics = {
+  trackId: string;
+  source: LyricsSource;
+  format: ParsedLrc["format"] | "text-only";
+  content: string; // LRC テキスト（text-only の場合は素のテキスト）
+  edited: boolean; // 人が手直ししたか
+  aiModel?: string; // "whisper-large-v3" 等
+  createdAt: number;
+  updatedAt: number;
 };
 
 export type StoredTrack = {
@@ -26,12 +45,18 @@ export type StoredTrack = {
 
 class AudiolistarDB extends Dexie {
   tracks!: Table<StoredTrack, string>;
+  lyrics!: Table<StoredLyrics, string>;
 
   constructor() {
     super("audiolistar");
+
     this.version(1).stores({
-      // 主キー id、よく検索しそうなものをインデックス化
       tracks: "id, fileName, addedAt",
+    });
+
+    this.version(2).stores({
+      tracks: "id, fileName, addedAt",
+      lyrics: "trackId, source, updatedAt",
     });
   }
 }
@@ -117,4 +142,18 @@ export function storedToTrack(s: StoredTrack): Track {
     previewStartSec: s.previewStartSec,
     previewEndSec: s.previewEndSec,
   };
+}
+
+export async function getLyrics(
+  trackId: string,
+): Promise<StoredLyrics | undefined> {
+  return db.lyrics.get(trackId);
+}
+
+export async function saveLyrics(l: StoredLyrics): Promise<void> {
+  await db.lyrics.put({ ...l, updatedAt: Date.now() });
+}
+
+export async function deleteLyrics(trackId: string): Promise<void> {
+  await db.lyrics.delete(trackId);
 }
