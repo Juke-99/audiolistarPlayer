@@ -6,6 +6,7 @@ import { useEngine } from "../contexts/EngineContext";
 import PlayerCard from "../components/PlayCard";
 import GhostPlayerCard from "../components/GhostPlayerCard";
 import LyricsPanel from "../components/LyricsPanel";
+import VolumeControl from "../components/VolumeControl";
 
 export default function PlayerPage() {
   const VISIBLE = 6; // 最大表示枚数
@@ -374,6 +375,16 @@ export default function PlayerPage() {
         >
           歌詞
         </button>
+
+        <span
+          style={{
+            marginLeft: 8,
+            display: "inline-flex",
+            verticalAlign: "middle",
+          }}
+        >
+          <VolumeControl />
+        </span>
       </div>
 
       {/* 中央配置（スタック表示に置換） */}

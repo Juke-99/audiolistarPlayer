@@ -1,13 +1,14 @@
-import { useNavigate } from "react-router-dom";
-import { useEngine } from "../contexts/EngineContext";
-import { useTracks } from "../contexts/TrackContext";
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
 } from "react";
+import { useNavigate } from "react-router-dom";
+import { useEngine } from "../contexts/EngineContext";
+import { useTracks } from "../contexts/TrackContext";
 import type { Track } from "../types/track";
 import { ACCEPT_RE } from "../constants/const";
 import { readMeta } from "../audio/audioRender/readMeta";
@@ -17,6 +18,7 @@ import { collectDroppedFiles } from "../utils/dropEntries";
 import { db, saveLyrics, trackToStored } from "../utils/db";
 import type { EmbeddedLyrics } from "../utils/extractEmbeddedLyrics";
 import { serializeLrc } from "../utils/lrc";
+import VolumeControl from "../components/VolumeControl";
 
 type PreviewMap = Record<string, { start: number; end: number }>;
 
@@ -24,6 +26,7 @@ export default function LibraryPage() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [previewMap, setPreviewMap] = useState<PreviewMap>({});
   const [isDragging, setIsDragging] = useState(false);
+  const [query, setQuery] = useState("");
 
   const compatFolderInputRef = useRef<HTMLInputElement | null>(null);
   const filesInputRef = useRef<HTMLInputElement | null>(null);
@@ -216,9 +219,46 @@ export default function LibraryPage() {
     nav(`/play/${dedup[0]}`); // ここは既存ルートに合わせて
   };
 
+  const stop = useCallback(() => engine.stop(), [engine]);
+
+  const deleteSelected = useCallback(async () => {
+    if (!selectedIds.length) return;
+
+    const ids = new Set(selectedIds);
+    const targets = tracks.filter((t) => ids.has(t.id));
+
+    if (
+      !confirm(
+        `選択した${targets.length}曲をライブラリから削除しますか？\n（元のファイルは削除されません）`,
+      )
+    ) {
+      return;
+    }
+
+    try {
+      engine.stop();
+    } catch {}
+
+    for (const t of targets) {
+      URL.revokeObjectURL(t.url);
+
+      const u = t.meta?.pictureUrl;
+      if (u && u.startsWith("blob:")) URL.revokeObjectURL(u);
+    }
+
+    try {
+      await db.tracks.bulkDelete([...ids]);
+      await db.lyrics.bulkDelete([...ids]);
+    } catch (e) {
+      console.warn("Failed to delete from IndexDB", e);
+    }
+
+    setTracks((prev) => prev.filter((t) => !ids.has(t.id)));
+    setSelectedIds([]);
+  }, [selectedIds, tracks, engine, setTracks]);
+
   const now = currentIndex != null ? tracks[currentIndex] : null;
   const displayTrack = now ?? tracks[0] ?? null;
-  const stop = useCallback(() => engine.stop(), [engine]);
 
   const getPreviewStartSec = (track: Track) => {
     const key = track.file?.name as string | undefined;
@@ -249,6 +289,25 @@ export default function LibraryPage() {
 
     return end;
   };
+
+  const visibleTracks = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return tracks;
+
+    return tracks.filter((t) => {
+      const title = (t.meta?.title ?? t.file.name).toLowerCase();
+      const artist = (t.meta?.artist ?? "").toLowerCase();
+      const album = (t.meta?.album ?? "").toLowerCase();
+      const fileName = t.file.name.toLowerCase();
+
+      return (
+        title.includes(q) ||
+        artist.includes(q) ||
+        album.includes(q) ||
+        fileName.includes(q)
+      );
+    });
+  }, [query, tracks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -375,6 +434,68 @@ export default function LibraryPage() {
           🎵 ファイルから取り込む
         </button>
 
+        <div
+          style={{
+            position: "relative",
+            display: "inline-flex",
+            alignItems: "center",
+          }}
+        >
+          <span
+            style={{
+              position: "absolute",
+              left: 12,
+              fontSize: 14,
+              opacity: 0.5,
+              pointerEvents: "none",
+            }}
+          >
+            🔍
+          </span>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="曲名・アーティストで検索"
+            style={{
+              height: 36,
+              paddingLeft: 34,
+              paddingRight: query ? 32 : 12,
+              borderRadius: 9999,
+              border: "1px solid rgba(0,0,0,.15)",
+              background: "white",
+              boxShadow: "0 2px 6px rgba(0,0,0,.06)",
+              fontSize: 14,
+              color: "#111",
+              width: 240,
+              outline: "none",
+            }}
+          />
+          {query && (
+            <button
+              onClick={() => setQuery("")}
+              title="検索をクリア"
+              style={{
+                position: "absolute",
+                right: 8,
+                width: 20,
+                height: 20,
+                borderRadius: 9999,
+                border: "none",
+                background: "rgba(0,0,0,.08)",
+                cursor: "pointer",
+                fontSize: 12,
+                lineHeight: 1,
+                display: "grid",
+                placeItems: "center",
+                color: "#111",
+              }}
+            >
+              ×
+            </button>
+          )}
+        </div>
+
         {selectedIds.length > 0 && (
           <>
             <div
@@ -401,10 +522,25 @@ export default function LibraryPage() {
             <button onClick={clearSelection} style={pillBtn}>
               選択解除
             </button>
+
+            <button
+              onClick={deleteSelected}
+              style={{
+                ...pillBtn,
+                background: "#fff",
+                color: "#dc2626",
+                borderColor: "rgba(220,38,38,.4)",
+              }}
+              title="選択した曲をライブラリから削除"
+            >
+              🗑 削除（{selectedIds.length}）
+            </button>
           </>
         )}
 
         <div style={{ flex: 1 }} />
+
+        <VolumeControl />
 
         <button onClick={stop} style={pillBtn} title="プレビュー再生を停止">
           ⏹ 停止
@@ -580,7 +716,7 @@ export default function LibraryPage() {
               maxHeight: "calc(100vh - 220px)",
             }}
           >
-            {tracks.map((t) => {
+            {visibleTracks.map((t) => {
               const selected = selectedIds.includes(t.id);
 
               return (
@@ -769,6 +905,19 @@ export default function LibraryPage() {
               );
             })}
           </ul>
+
+          {query && visibleTracks.length === 0 && (
+            <div
+              style={{
+                padding: "24px 12px",
+                textAlign: "center",
+                color: "#6b7280",
+                fontSize: 14,
+              }}
+            >
+              「{query}」に一致する曲がありません
+            </div>
+          )}
         </section>
       </div>
     </>

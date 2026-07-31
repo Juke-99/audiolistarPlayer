@@ -31,6 +31,8 @@ type Engine = {
   getAnalyser: () => AnalyserNode | null;
   play: (opts: PlayOpts) => Promise<void>;
   stop: () => Promise<void>;
+  setVolume: (v: number) => void;
+  getVolume: () => void;
   /** プレビュー区間が終わった/フルで ended に到達した通知 */
   onPreviewEnd: (cb: PreviewEndListener) => () => void;
   pause: () => void;
@@ -60,6 +62,10 @@ export function usePreviewEngine({
   // プレイヤー状態通知用（UIの時間表示/ボタン状態）
   const tickListenersRef = useRef<Set<TickListener>>(new Set());
 
+  // プレイヤーの音量制御
+  const volumeGainRef = useRef<GainNode | null>(null);
+  const volumeRef = useRef<number>(1);
+
   const onPreviewEnd = (cb: PreviewEndListener) => {
     listenersRef.current.add(cb);
     return () => listenersRef.current.delete(cb);
@@ -81,7 +87,7 @@ export function usePreviewEngine({
   };
 
   const getBufferedArray = (
-    audio: HTMLAudioElement
+    audio: HTMLAudioElement,
   ): { start: number; end: number }[] => {
     const arr: { start: number; end: number }[] = [];
     const r = audio.buffered;
@@ -113,8 +119,9 @@ export function usePreviewEngine({
 
   async function ensureNodes() {
     if (!audioCtxRef.current) {
-      audioCtxRef.current = new (window.AudioContext ||
-        (window as any).webkitAudioContext)();
+      audioCtxRef.current = new (
+        window.AudioContext || (window as any).webkitAudioContext
+      )();
     }
 
     if (!audioElRef.current) {
@@ -134,12 +141,13 @@ export function usePreviewEngine({
       try {
         mediaSrcRef.current?.disconnect();
         gainRef.current?.disconnect();
+        volumeGainRef.current?.disconnect();
         analyserRef.current?.disconnect();
       } catch {}
 
       // 新規構築
       mediaSrcRef.current = audioCtxRef.current!.createMediaElementSource(
-        audioElRef.current!
+        audioElRef.current!,
       );
 
       if (!gainRef.current) {
@@ -155,9 +163,16 @@ export function usePreviewEngine({
         analyserRef.current.maxDecibels = -10;
       }
 
+      if (!volumeGainRef.current) {
+        volumeGainRef.current = audioCtxRef.current!.createGain();
+        volumeGainRef.current.gain.value = volumeRef.current;
+      }
+
       mediaSrcRef.current.connect(analyserRef.current!); // 解析はゲインより前でタップ
       mediaSrcRef.current.connect(gainRef.current!); // 音はゲインへ
-      gainRef.current!.connect(audioCtxRef.current!.destination); // 出力へ
+      // gainRef.current!.connect(audioCtxRef.current!.destination); // 出力へ
+      gainRef.current!.connect(volumeGainRef.current!); // ユーザー音量
+      volumeGainRef.current!.connect(audioCtxRef.current!.destination); // 出力へ
     }
 
     // 一度だけイベントを張る（フル終了 and プレビュー終端検知）
@@ -181,7 +196,7 @@ export function usePreviewEngine({
             g.gain.setValueAtTime(g.gain.value, now);
             g.gain.linearRampToValueAtTime(
               0,
-              now + Math.min(0.08, fadeOutMs / 1000)
+              now + Math.min(0.08, fadeOutMs / 1000),
             );
           } catch {}
 
@@ -276,6 +291,29 @@ export function usePreviewEngine({
     }, fadeOutMs);
   }
 
+  function setVolume(v: number) {
+    const clamped = Math.min(1, Math.max(0, v));
+    volumeRef.current = clamped;
+
+    const g = volumeGainRef.current;
+    const ctx = audioCtxRef.current;
+    if (!g || !ctx) return;
+
+    try {
+      const now = ctx.currentTime;
+      g.gain.cancelScheduledValues(now);
+      g.gain.setValueAtTime(g.gain.value, now);
+      // 短くランプさせてプチノイズを防ぐ
+      g.gain.linearRampToValueAtTime(clamped, now + 0.03);
+    } catch {
+      g.gain.value = clamped;
+    }
+  }
+
+  function getVolume() {
+    return volumeRef.current;
+  }
+
   function pause() {
     if (!audioElRef.current) return;
     audioElRef.current.pause();
@@ -331,6 +369,8 @@ export function usePreviewEngine({
       getAnalyser,
       play,
       stop,
+      setVolume,
+      getVolume,
       onPreviewEnd,
       pause,
       resume,
@@ -339,6 +379,6 @@ export function usePreviewEngine({
       onTick,
       getState,
     }),
-    []
+    [],
   );
 }
