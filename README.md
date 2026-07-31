@@ -1,69 +1,93 @@
-# React + TypeScript + Vite
+# AudioStar☆彡
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+ブラウザ上で動く音楽プレイヤー。手元の音楽ファイルを取り込んでレビューし、気に入った曲をピックしてプレイリストとして連続再生できる Web アプリケーション。
 
-Currently, two official plugins are available:
+## 特徴
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **ローカルファイル再生** — ファイルやフォルダを取り込んで即再生。サーバーへのアップロードは不要、すべてブラウザ内で完結
+- **レビュー → ピック → プレイリスト再生** — トップページで曲をプレビュー試聴し、気になったものを選んで別ページで連続再生
+- **オーディオビジュアライザ** — Web Audio API による周波数解析で背景にブロック波形を描画。対数周波数マッピングで低音から高音まで均等に表示
+- **メタデータ自動読み込み** — タイトル・アーティスト・アルバム・アートワークを ID3v2 / MP4 タグから取得
+- **対応形式** — mp3 / m4a / aac / wav / flac / ogg
 
-## Expanding the ESLint configuration
+## 技術スタック
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+- React 19
+- TypeScript 5.8
+- Vite 7
+- react-router-dom 7
+- music-metadata — タグ解析
 
-```js
-export default tseslint.config([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+## セットアップ
 
-      // Remove tseslint.configs.recommended and replace with this
-      ...tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      ...tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      ...tseslint.configs.stylisticTypeChecked,
+### 必要環境
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+- Node.js 20 以上
+- npm
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### 開発サーバ
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+​`bash
+npm install
+npm run dev
+​`
 
-export default tseslint.config([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+`http://localhost:5173` でアクセス。
+
+### ビルド
+
+​`bash
+npm run build
+​`
+
+`dist/` に出力。
+
+### 本番ビルドの確認
+
+​`bash
+npm run preview
+​`
+
+### Lint
+
+​`bash
+npm run lint
+​`
+
+## 使い方
+
+1. トップページで **フォルダ選択** または **ファイル選択** から音楽ファイルを取り込む
+2. 各曲の **▶︎** ボタンでプレビュー試聴
+3. 気になった曲を **「リストに追加」** チェックで選択
+4. ツールバーの **「選択をプレイヤーで再生」** で再生画面へ
+5. 再生画面では選択した曲が順番に再生され、シーク・前後送り・一時停止などが可能
+
+## ブラウザ要件
+
+- 推奨: 最新の Chromium 系ブラウザ（Chrome / Edge）
+- フォルダ取り込みの高速モードは [File System Access API](https://developer.mozilla.org/ja/docs/Web/API/File_System_Access_API) を使用。未対応ブラウザでは互換モードに自動フォールバック
+
+## ロードマップ
+
+### ブラウザ版（現行）
+
+- [x] ローカルファイル取り込み・再生
+- [x] プレイリスト再生（キュー対応）
+- [x] 再生コントロール（再生/一時停止・シーク・前後送り）
+- [x] オーディオビジュアライザ（対数周波数マッピング）
+- [ ] 音量調整 UI
+- [ ] アップロード UI / 取り込みフローの改善
+- [ ] 永続化（IndexedDB によるトラック情報の保持）
+- [ ] アートワーク自動補完（iTunes Search API）
+- [ ] 検索・フィルタ・並び替え
+- [ ] シャッフル / リピート
+- [ ] キーボードショートカット
+
+### 将来構想
+
+- [ ] Electron によるデスクトップアプリ化
+- [ ] Dolby / バーチャルサラウンドなどのオーディオ強化機能（Electron 化後）
+
+## ライセンス
+
+[MIT](LICENSE)
