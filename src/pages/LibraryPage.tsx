@@ -18,6 +18,7 @@ import { collectDroppedFiles } from "../utils/dropEntries";
 import { db, saveLyrics, trackToStored } from "../utils/db";
 import type { EmbeddedLyrics } from "../utils/extractEmbeddedLyrics";
 import { serializeLrc } from "../utils/lrc";
+import VolumeControl from "../components/VolumeControl";
 
 type PreviewMap = Record<string, { start: number; end: number }>;
 
@@ -538,6 +539,8 @@ export default function LibraryPage() {
         )}
 
         <div style={{ flex: 1 }} />
+
+        <VolumeControl />
 
         <button onClick={stop} style={pillBtn} title="プレビュー再生を停止">
           ⏹ 停止
