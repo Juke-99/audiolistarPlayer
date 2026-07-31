@@ -218,9 +218,46 @@ export default function LibraryPage() {
     nav(`/play/${dedup[0]}`); // ここは既存ルートに合わせて
   };
 
+  const stop = useCallback(() => engine.stop(), [engine]);
+
+  const deleteSelected = useCallback(async () => {
+    if (!selectedIds.length) return;
+
+    const ids = new Set(selectedIds);
+    const targets = tracks.filter((t) => ids.has(t.id));
+
+    if (
+      !confirm(
+        `選択した${targets.length}曲をライブラリから削除しますか？\n（元のファイルは削除されません）`,
+      )
+    ) {
+      return;
+    }
+
+    try {
+      engine.stop();
+    } catch {}
+
+    for (const t of targets) {
+      URL.revokeObjectURL(t.url);
+
+      const u = t.meta?.pictureUrl;
+      if (u && u.startsWith("blob:")) URL.revokeObjectURL(u);
+    }
+
+    try {
+      await db.tracks.bulkDelete([...ids]);
+      await db.lyrics.bulkDelete([...ids]);
+    } catch (e) {
+      console.warn("Failed to delete from IndexDB", e);
+    }
+
+    setTracks((prev) => prev.filter((t) => !ids.has(t.id)));
+    setSelectedIds([]);
+  }, [selectedIds, tracks, engine, setTracks]);
+
   const now = currentIndex != null ? tracks[currentIndex] : null;
   const displayTrack = now ?? tracks[0] ?? null;
-  const stop = useCallback(() => engine.stop(), [engine]);
 
   const getPreviewStartSec = (track: Track) => {
     const key = track.file?.name as string | undefined;
@@ -483,6 +520,19 @@ export default function LibraryPage() {
             </button>
             <button onClick={clearSelection} style={pillBtn}>
               選択解除
+            </button>
+
+            <button
+              onClick={deleteSelected}
+              style={{
+                ...pillBtn,
+                background: "#fff",
+                color: "#dc2626",
+                borderColor: "rgba(220,38,38,.4)",
+              }}
+              title="選択した曲をライブラリから削除"
+            >
+              🗑 削除（{selectedIds.length}）
             </button>
           </>
         )}
